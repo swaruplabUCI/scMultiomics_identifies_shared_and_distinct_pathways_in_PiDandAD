@@ -31,11 +31,12 @@ Software, Algorithms, and Resources
 Zechuan Shi [@rootze](https://github.com/rootze) created analysis documents that combine code
 
 **Programming software**:
-- R v4.1.1
-- Python v3.10.6
+- R v4.1.1 and above
+- Python v3.6 and above
 
 **Tools_Software**:
-- Cellranger-atac
+- Cellranger-atac (v2.0.0)
+- Split-pipe (v1.0.3)
 - ArchR (v1.0.2)
 - Signac (v1.9.0)
 - ArchRtoSignac (v1.0.4)
