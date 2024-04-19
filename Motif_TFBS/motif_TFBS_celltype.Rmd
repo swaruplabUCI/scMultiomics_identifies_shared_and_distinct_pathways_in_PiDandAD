@@ -1,0 +1,254 @@
+### NOTE 10/28/2023
+## Ze
+# conda activate scRNAnATAC_R
+
+TFBS -- Motif
+
+* need a table that has peak, TF, target gene, enhancer/promoter, coaccessibility, and footprint binding score
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(GenomicRanges)
+theme_set(theme_cowplot())
+
+cur_celltype <- 'EX'
+# cur_celltype <- 'MG'
+# cur_celltype <- 'ODC'
+# cur_celltype <- 'ASC'
+
+# PATH
+data_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/TF_Net/from_Sam/TF_net/data/'
+fig_dir <- paste0('/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Motif_TFBS/figures/', cur_celltype, '/')
+data_out <- paste0('/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Motif_TFBS/data/', cur_celltype, '/')
+
+NEW_enhancer_gene_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/Analysis_n_Figures/data/'
+
+# load the peaks table
+peaks <- read.csv('/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/peak_table.csv')
+peaks <- GRanges(peaks)
+peaks$peak <- paste0(
+  as.character(seqnames(peaks)), '-',
+  as.character(start(peaks)), '-',
+  as.character(end(peaks))
+)
+
+####################################################################
+# load footprint data & enhancer-gene maps
+####################################################################
+
+tfbs_ad <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_AD.csv'))
+tfbs_pid <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_PiD.csv'))
+
+head(tfbs_pid)
+
+# add column for the tfbs coords
+tfbs_ad$TFBS_coords <- paste0(tfbs_ad$TFBS_chr, '-', tfbs_ad$TFBS_start, '-', tfbs_ad$TFBS_end)
+tfbs_pid$TFBS_coords <- paste0(tfbs_pid$TFBS_chr, '-', tfbs_pid$TFBS_start, '-', tfbs_pid$TFBS_end)
+# add column for the peak coords
+tfbs_ad$peak_coords <- paste0(tfbs_ad$peak_chr, '-', tfbs_ad$peak_start, '-', tfbs_ad$peak_end)
+tfbs_pid$peak_coords <- paste0(tfbs_pid$peak_chr, '-', tfbs_pid$peak_start, '-', tfbs_pid$peak_end)
+
+# load enhancer-gene maps but this time FULL -- Linkage
+# map_AD <- read.csv(file=paste0(NEW_enhancer_gene_dir, 'enhancer_gene_map_combined_AD.csv'))
+map_AD_AD <- read.csv(file=paste0(NEW_enhancer_gene_dir, cur_celltype, '_AD_full_link_table_AD.csv'))
+map_AD_Control <- read.csv(file=paste0(NEW_enhancer_gene_dir, cur_celltype, '_Control_full_link_table_AD.csv'))
+map_AD <- rbind(map_AD_AD, map_AD_Control)
+
+# map_PiD <- read.csv(file=paste0(NEW_enhancer_gene_dir, 'enhancer_gene_map_combined_PiD.csv'))
+map_PiD_PiD <- read.csv(file=paste0(NEW_enhancer_gene_dir, cur_celltype, '_PiD_full_link_table.csv'))
+map_PiD_Control <- read.csv(file=paste0(NEW_enhancer_gene_dir, cur_celltype, '_Control_full_link_table.csv'))
+map_PiD <- rbind(map_PiD_PiD, map_PiD_Control)
+
+rm(map_AD_AD, map_AD_Control, map_PiD_PiD, map_PiD_Control)
+
+
+map_AD$Study <- 'AD'; map_PiD$Study <- 'PiD'
+map_both <- rbind(map_AD, map_PiD)
+map_both$plot_condition <- ifelse(
+  map_both$condition == 'Control' & map_both$Study == 'AD',
+  'Control (AD)', ifelse(
+    map_both$condition == 'Control' & map_both$Study == 'PiD',
+    'Control (PiD)', map_both$condition
+  )
+)
+map_both$plot_condition <- factor(
+  as.character(map_both$plot_condition),
+  levels = c('Control (AD)', 'AD', 'Control (PiD)', 'PiD')
+)
+
+
+# ####################################################################
+#=========================================
+# NOTE AD
+#=========================================
+
+cur_dataset <- 'AD'
+# cur_dataset <- 'PiD'
+if(cur_dataset == 'AD'){
+  cur_map <- subset(map_AD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_ad
+} else{
+  cur_map <- subset(map_PiD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_pid
+}
+# list of TFs
+tfs <- unique(tfbs_df$TFBS_name)
+
+# > head(tfs)
+write.csv(tfs, file=paste0(data_out, 'list_of_TFs_', cur_dataset, '_', cur_celltype, '.csv'), row.names=FALSE, quote=FALSE)
+
+
+# convert name to human style, and only keep TFs that we have in our peakset
+tf_genes <- do.call(rbind, strsplit(tfs, '_'))[,1] %>% str_to_upper()
+# > head(tf_genes)
+
+tf_genes[!(tf_genes %in% peaks$nearestGene)] # tfs that we don't have gene info for in our peaks
+
+names(tf_genes) <- tfs
+
+
+ix <- match(tfbs_df$TFBS_name, tfs)
+tfbs_df$TFBS_gene_name <- tf_genes[ix]
+
+# NOTE
+# list of valid peaks
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak
+enhancer_peaks <- cur_map %>% subset(Peak2_type != 'Exonic') %>% .$Peak2 %>% unique
+valid_peaks <- c(promoter_peaks, enhancer_peaks)
+# add the peakType to the tfbs_df
+ix <- match(tfbs_df$peak_coords, peaks$peak)
+tfbs_df$peakType <- peaks$peakType[ix]
+
+nrow(tfbs_df)
+
+
+# only keep valid peaks
+tfbs_df <- subset(tfbs_df, peak_coords %in% valid_peaks)
+nrow(tfbs_df)
+
+# get the target gene as the nearest gene for the promoters:
+tfbs_promoter <- subset(tfbs_df, peakType == 'Promoter')
+tfbs_enhancer <- subset(tfbs_df, peakType != 'Promoter')
+
+# get TFs that are in linked enhancers
+cur_map$peak_coords <- cur_map$Peak2
+tfbs_enhancer <- left_join(tfbs_enhancer, cur_map, by='peak_coords')
+# Warning message:
+# In left_join(tfbs_enhancer, cur_map, by = "peak_coords") :
+#   Each row in `x` is expected to match at most 1 row in `y`.
+# ℹ Row 4 of `x` matches multiple rows.
+# ℹ If multiple matches are expected, set `multiple = "all"` to silence this warning.
+
+tfbs_enhancer$target_gene <- tfbs_enhancer$Peak1_nearestGene
+tfbs_enhancer$bs_type <- 'Enhancer'
+all(tfbs_enhancer$peak_coords %in% cur_map$peak_coords)
+all(cur_map$peak_coords %in% tfbs_enhancer$peak_coords)
+
+# > all(tfbs_enhancer$peak_coords %in% cur_map$peak_coords)
+# [1] TRUE
+# > all(cur_map$peak_coords %in% tfbs_enhancer$peak_coords)
+# [1] TRUE
+
+# get TFs that are in promoter regions
+ix <- match(tfbs_promoter$peak_coords, peaks$peak)
+tfbs_promoter$target_gene <- peaks$nearestGene[ix]
+tfbs_promoter$coaccess <- 1
+tfbs_promoter$bs_type <- 'Promoter'
+# put together the promoter & enhancer tables
+cols_keep <- c(colnames(tfbs_df), 'target_gene', 'coaccess', 'bs_type')
+# tfbs_combined <- rbind(tfbs_promoter[,cols_keep], tfbs_enhancer[,cols_keep])
+
+promoter_df_tfbs <- tfbs_promoter[,cols_keep]
+enhancer_df_tfbs <- tfbs_enhancer[,cols_keep]
+
+# object.size(tfbs_combined)
+#######
+save(promoter_df_tfbs, file = paste0(data_out, "Motif_tfbs_promoter_", cur_celltype, "_",cur_dataset, ".rda"))
+save(enhancer_df_tfbs, file = paste0(data_out, "Motif_tfbs_enhancer_", cur_celltype, "_",cur_dataset, ".rda"))
+
+
+#=========================================
+# NOTE PiD
+#=========================================
+
+cur_dataset <- 'PiD'
+# cur_dataset <- 'PiD'
+if(cur_dataset == 'AD'){
+  cur_map <- subset(map_AD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_ad
+} else{
+  cur_map <- subset(map_PiD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_pid
+}
+# list of TFs
+tfs <- unique(tfbs_df$TFBS_name)
+# > head(tfs)
+write.csv(tfs, file=paste0(data_out, 'list_of_TFs_', cur_dataset, '_', cur_celltype, '.csv'), row.names=FALSE, quote=FALSE)
+
+
+# convert name to human style, and only keep TFs that we have in our peakset
+tf_genes <- do.call(rbind, strsplit(tfs, '_'))[,1] %>% str_to_upper()
+# > head(tf_genes)
+
+
+tf_genes[!(tf_genes %in% peaks$nearestGene)] # tfs that we don't have gene info for in our peaks
+
+names(tf_genes) <- tfs
+
+
+ix <- match(tfbs_df$TFBS_name, tfs)
+tfbs_df$TFBS_gene_name <- tf_genes[ix]
+
+# NOTE
+# list of valid peaks
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak
+enhancer_peaks <- cur_map %>% subset(Peak2_type != 'Exonic') %>% .$Peak2 %>% unique
+valid_peaks <- c(promoter_peaks, enhancer_peaks)
+# add the peakType to the tfbs_df
+ix <- match(tfbs_df$peak_coords, peaks$peak)
+tfbs_df$peakType <- peaks$peakType[ix]
+
+nrow(tfbs_df)
+
+
+# only keep valid peaks
+tfbs_df <- subset(tfbs_df, peak_coords %in% valid_peaks)
+nrow(tfbs_df)
+
+# get the target gene as the nearest gene for the promoters:
+tfbs_promoter <- subset(tfbs_df, peakType == 'Promoter')
+tfbs_enhancer <- subset(tfbs_df, peakType != 'Promoter')
+
+# get TFs that are in linked enhancers
+cur_map$peak_coords <- cur_map$Peak2
+tfbs_enhancer <- left_join(tfbs_enhancer, cur_map, by='peak_coords')
+
+
+tfbs_enhancer$target_gene <- tfbs_enhancer$Peak1_nearestGene
+tfbs_enhancer$bs_type <- 'Enhancer'
+all(tfbs_enhancer$peak_coords %in% cur_map$peak_coords)
+all(cur_map$peak_coords %in% tfbs_enhancer$peak_coords)
+
+
+# get TFs that are in promoter regions
+ix <- match(tfbs_promoter$peak_coords, peaks$peak)
+tfbs_promoter$target_gene <- peaks$nearestGene[ix]
+tfbs_promoter$coaccess <- 1
+tfbs_promoter$bs_type <- 'Promoter'
+# put together the promoter & enhancer tables
+cols_keep <- c(colnames(tfbs_df), 'target_gene', 'coaccess', 'bs_type')
+# tfbs_combined <- rbind(tfbs_promoter[,cols_keep], tfbs_enhancer[,cols_keep])
+
+promoter_df_tfbs <- tfbs_promoter[,cols_keep]
+enhancer_df_tfbs <- tfbs_enhancer[,cols_keep]
+
+
+#######
+save(promoter_df_tfbs, file = paste0(data_out, "Motif_tfbs_promoter_", cur_celltype, "_",cur_dataset, ".rda"))
+save(enhancer_df_tfbs, file = paste0(data_out, "Motif_tfbs_enhancer_", cur_celltype, "_",cur_dataset, ".rda"))

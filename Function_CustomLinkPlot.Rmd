@@ -1,0 +1,150 @@
+
+CustomLinkPlot function
+
+```{r eval=FALSE}
+
+
+#' CustomLinkPlot
+#'
+#' Modification of the Signac LinkPlot function for extra customization
+#'
+#' @param object A Seurat object
+#' @param region Genomic region to plot
+#' @param links
+#' @param assay Selected assay in the Seurat object
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @keywords coaccessibility
+#' @export
+#' @examples
+#'
+CustomLinkPlot <- function(
+  object,
+  region,
+  links = NULL,
+  assay = NULL,
+  min.cutoff = 0,
+  sep = c("-", "-"),
+  extend.upstream = 0,
+  extend.downstream = 0,
+  negative=TRUE,
+  ymax = NULL,
+  color_high = 'blue',
+  color_mid = 'grey',
+  color_low = 'red'
+) {
+  region <- Signac:::FindRegion(
+    object = object,
+    region = region,
+    sep = sep,
+    assay = assay,
+    extend.upstream = extend.upstream,
+    extend.downstream = extend.downstream
+  )
+  chromosome <- seqnames(x = region)
+
+  # extract link information
+  if(is.null(links)){
+    links <- Links(object = object)
+  }
+
+  # if links not set, return NULL
+  if (length(x = links) == 0) {
+    return(NULL)
+  }
+
+  # subset to those in region
+  links.keep <- subsetByOverlaps(x = links, ranges = region)
+
+  # filter out links below threshold
+  link.df <- as.data.frame(x = links.keep)
+  link.df <- link.df[abs(x = link.df$score) > min.cutoff, ]
+
+  # remove links outside region
+  link.df <- link.df[link.df$start >= start(x = region) & link.df$end <= end(x = region), ]
+
+  # plot
+  if (nrow(x = link.df) > 0) {
+    if (!requireNamespace(package = "ggforce", quietly = TRUE)) {
+      warning("Please install ggforce to enable LinkPlot plotting: ",
+              "install.packages('ggforce')")
+      p <- ggplot(data = link.df)
+    } else {
+      # convert to format for geom_bezier
+      link.df$group <- seq_len(length.out = nrow(x = link.df))
+
+      if(negative){
+        link.df$score <- link.df$score * -1
+      }
+
+      df <- data.frame(
+        x = c(link.df$start,
+              (link.df$start + link.df$end) / 2,
+              link.df$end),
+        y = c(rep(x = 0, nrow(x = link.df)),
+              #rep(x = -1, nrow(x = link.df)),
+              2*link.df$score,
+              rep(x = 0, nrow(x = link.df))),
+        type = rep('cubic', nrow(link.df)),
+        group = rep(x = link.df$group, 3),
+        score = rep(link.df$score, 3)
+      )
+
+      df$alp <- abs(df$score)
+
+
+      # sort by the score
+      # if(negative){
+      # #  df <- df %>% arrange(desc(score))
+      #   df <- df %>% arrange(score)
+      # } else{
+      #   df <- df %>% arrange(score)
+      # }
+      if(!negative){
+        df$group <- factor(df$group, levels=unique(df$group[order(df$score)]))
+      }else{
+        df$group <- factor(df$group, levels=unique(df$group[rev(order(df$score))]))
+      }
+
+
+      min.color <- min(0, min(df$score))
+      print(range(df$score))
+      print(min.color)
+      p <- ggplot(data = df) +
+        ggforce::geom_bezier(
+          mapping = aes_string(
+            x = "x", y = "y",
+            group = "group",
+            color = "score", alpha="alp",
+            linetype = 'type'
+          )
+        ) +
+        geom_hline(yintercept = 0, color = 'grey') +
+        scale_color_gradient2(low = color_low, mid = color_mid, high = color_high,
+                              #limits = c(min.color, ymax),
+                              n.breaks = 3)
+
+    }
+  } else {
+    p <- ggplot(data = link.df)
+  }
+  p <- p +
+    theme_classic() +
+    # theme(axis.ticks.y = element_blank(),
+    #       axis.text.y = element_blank()) +
+    ylab("Links") +
+    xlab(label = paste0(chromosome, " position (bp)")) +
+    xlim(c(start(x = region), end(x = region)))
+  return(p)
+}
+
+
+
+```

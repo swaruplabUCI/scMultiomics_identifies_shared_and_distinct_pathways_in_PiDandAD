@@ -1,0 +1,307 @@
+
+```{r eval=FALSE}
+## NOTE : Date - 04/21/2023
+# Project: Pick's Disease + AD
+
+# Ze + # Sam's code
+# working directory: /dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data
+
+# conda activate scRNAnATAC_R
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(GenomicRanges)
+library(ggpubr)
+library(ggplot2)
+library(patchwork)
+theme_set(theme_cowplot())
+setwd('/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/Analysis_n_Figures/')
+data_dir <- 'data/'
+fig_dir <- 'otherfigures/'
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank(),
+  plot.title = element_text(hjust = 0.5)
+)
+
+# loading colors
+load('/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/color_scheme.rda')
+
+cp <- color_scheme_snATAC_celltype
+cp$Unknown <- NULL
+dx_cp <- c(
+  AD = "#E87D72",
+  PiD = "#a572e8",
+  Control = "#55BCC2"
+)
+
+
+# load the PiD + AD seurat_obj object
+# /dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Data/PiD_AD_integrated_input_wUpdatedFragPath_08_09_2022.rds
+# seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated.rds')
+seurat_obj <- readRDS(file='/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Data/PiD_AD_integrated_input_wUpdatedFragPath_08_09_2022.rds')
+
+head(seurat_obj@meta.data)
+table(seurat_obj$DX)
+table(seurat_obj$Diagnosis)
+table(seurat_obj$Sample)
+
+#
+# # fix some of the meta-data that was different between the two studies
+# seurat_obj$Diagnosis <- ifelse(seurat_obj$Dataset == 'AD', seurat_obj$Diagnosis, seurat_obj$DX)
+# seurat_obj$Diagnosis <- ifelse(seurat_obj$Diagnosis == "Pick's disease", 'PiD', seurat_obj$Diagnosis)
+# # add the UMAP coordinates:
+# seurat_obj$UMAP_1 <- seurat_obj@reductions$umap@cell.embeddings[,1]
+# seurat_obj$UMAP_2 <- seurat_obj@reductions$umap@cell.embeddings[,2]
+seurat_obj$Sample <- ifelse(
+  seurat_obj$Dataset == 'AD',
+  paste0('AD_', as.character(seurat_obj$Sample.ID)),
+  paste0('PiD_', as.character(seurat_obj$SampleID))
+)
+
+table(seurat_obj$Sample)
+
+
+# load peaksets
+# seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated.rds')
+peaks <- read.csv('/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/peak_table.csv')
+peaks <- GRanges(peaks)
+peaks$peak <- paste0(
+  as.character(seqnames(peaks)), '-',
+  as.character(start(peaks)), '-',
+  as.character(end(peaks))
+)
+
+
+
+```
+
+Make a GRanges object with all of the Cicero outputs:
+
+```{r eval=FALSE}
+###########################################################
+# PiD analysis
+###########################################################
+cicero_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/Processing_window3e5_sampleN200/PiDnControl/'
+# get a list of the cicero outputs for each group:
+conn_files <- dir(cicero_dir)[grepl('connections', dir(cicero_dir))]
+#load(paste0(cicero_dir, "ODC_cicero_connections.rda"))
+# settings
+coaccess_percentile <- 0.95
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak %>% unique
+# loop over all the cicero outputs:
+link_list <- list()
+for(i in 1:length(conn_files)){
+  # get celltype from file name
+  cur_file <- conn_files[i]
+  cur_celltype <- strsplit(cur_file, '_')[[1]][1]
+  print(cur_celltype)
+  # load the dataset for this celltype
+  load(paste0(cicero_dir, cur_file))
+  # combine the Control + Disease connections into one table
+  # nevermind, don't do this!!!!
+  conns_PiD$condition <- 'PiD'
+  conns_control$condition <- 'Control'
+  conns_list <- list(conns_PiD, conns_control)
+  for(conns in conns_list){
+    conns$celltype <- cur_celltype
+    cur_group <- unique(conns$condition)
+    print(cur_group)
+    # get all non-zero links:
+    link_df <- conns %>% subset(coaccess > 0)
+    link_df$Peak1 <- as.character(link_df$Peak1)
+    link_df$Peak2 <- as.character(link_df$Peak2)
+    # nearest gene & peakType for peak1
+    temp <- peaks[match(link_df$Peak1, peaks$peak),]
+    link_df$Peak1_nearestGene <- temp$nearestGene
+    link_df$Peak1_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak1)
+    # nearest gene & peakType for peak2
+    temp <- peaks[match(link_df$Peak2, peaks$peak),]
+    link_df$Peak2_nearestGene <- temp$nearestGene
+    link_df$Peak2_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak2)
+    # just get entries where Peak1 is a promoter
+    link_df <- link_df %>% subset(
+      Peak1_type == 'Promoter' &
+      Peak2_type != 'Promoter'
+    )
+    # distance between peak and target gene
+    peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+    peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+    link_df$distance_bp <- abs(start(peak1_ranges) - start(peak2_ranges))
+    # threshold for co-accessibility
+    link_df_full <- link_df
+    coaccess_thresh <- quantile(link_df_full$coaccess, coaccess_percentile)
+    coaccess_thresh
+    dim(link_df_full[link_df$coaccess >= coaccess_thresh,])
+    link_df <- link_df_full[link_df$coaccess >= coaccess_thresh,]
+    # save results
+    write.csv(link_df, file=paste0(data_dir, cur_celltype, '_', cur_group, '_gl-cCREs.csv'), row.names=FALSE, quote=FALSE)
+    write.csv(link_df_full, file=paste0(data_dir, cur_celltype, '_', cur_group,'_full_link_table.csv'), row.names=FALSE, quote=FALSE)
+    link_list[[paste0(cur_celltype, '_', cur_group)]] <- link_df
+  }
+}
+# combine into one dataframe:
+combined_df <- do.call(rbind, link_list)
+write.csv(combined_df, file=paste0(data_dir, 'enhancer_gene_map_combined_PiD.csv'), row.names=FALSE, quote=FALSE)
+# make GRanges objects for peak1 & peak2
+peak1_ranges <- Signac::StringToGRanges(combined_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(combined_df$Peak2, sep=c('-', '-'))
+
+
+###########################################################
+# AD analysis
+###########################################################
+cicero_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/Processing_window3e5_sampleN200/ADnControl/'
+# get a list of the cicero outputs for each group:
+conn_files <- dir(cicero_dir)[grepl('connections', dir(cicero_dir))]
+# load(paste0(cicero_dir, "ODC_cicero_connections.rda"))
+# settings
+coaccess_percentile <- 0.95
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak %>% unique
+# loop over all the cicero outputs:
+link_list <- list()
+for(i in 1:length(conn_files)){
+  # get celltype from file name
+  cur_file <- conn_files[i]
+  cur_celltype <- strsplit(cur_file, '_')[[1]][1]
+  print(cur_celltype)
+  # load the dataset for this celltype
+  load(paste0(cicero_dir, cur_file))
+  conns_AD$condition <- 'AD'
+  conns_control$condition <- 'Control'
+  conns_list <- list(conns_AD, conns_control)
+  for(conns in conns_list){
+    conns$celltype <- cur_celltype
+    cur_group <- unique(conns$condition)
+    print(cur_group)
+    # get all non-zero links:
+    link_df <- conns %>% subset(coaccess > 0)
+    link_df$Peak1 <- as.character(link_df$Peak1)
+    link_df$Peak2 <- as.character(link_df$Peak2)
+    # nearest gene & peakType for peak1
+    temp <- peaks[match(link_df$Peak1, peaks$peak),]
+    link_df$Peak1_nearestGene <- temp$nearestGene
+    link_df$Peak1_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak1)
+    # nearest gene & peakType for peak2
+    temp <- peaks[match(link_df$Peak2, peaks$peak),]
+    link_df$Peak2_nearestGene <- temp$nearestGene
+    link_df$Peak2_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak2)
+    # just get entries where Peak1 is a promoter
+    link_df <- link_df %>% subset(
+      Peak1_type == 'Promoter' &
+      Peak2_type != 'Promoter'
+    )
+    # distance between peak and target gene
+    peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+    peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+    link_df$distance_bp <- abs(start(peak1_ranges) - start(peak2_ranges))
+    # threshold for co-accessibility
+    link_df_full <- link_df
+    coaccess_thresh <- quantile(link_df_full$coaccess, coaccess_percentile)
+    coaccess_thresh
+    dim(link_df_full[link_df$coaccess >= coaccess_thresh,])
+    link_df <- link_df_full[link_df$coaccess >= coaccess_thresh,]
+    # save results
+    write.csv(link_df, file=paste0(data_dir, cur_celltype, '_', cur_group, '_gl-cCREs_AD.csv'), row.names=FALSE, quote=FALSE)
+    write.csv(link_df_full, file=paste0(data_dir, cur_celltype, '_', cur_group,'_full_link_table_AD.csv'), row.names=FALSE, quote=FALSE)
+    link_list[[paste0(cur_celltype, '_', cur_group)]] <- link_df
+  }
+}
+# combine into one dataframe:
+combined_df <- do.call(rbind, link_list)
+write.csv(combined_df, file=paste0(data_dir, 'enhancer_gene_map_combined_AD.csv'), row.names=FALSE, quote=FALSE)
+# make GRanges objects for peak1 & peak2
+peak1_ranges <- Signac::StringToGRanges(combined_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(combined_df$Peak2, sep=c('-', '-'))
+
+
+```
+
+Comparing co-accessibility scores between AD & PiD
+
+```{r eval=FALSE}
+
+library(ggpubr) #stat_cor()
+
+# cur_celltype <- 'ASC'
+plot_list <- list()
+cor_list <- list()
+for(cur_celltype in unique(seurat_obj$celltype)){
+  print(cur_celltype)
+  link_df_ad <- read.csv(file=paste0(data_dir, cur_celltype, '_AD_full_link_table_AD.csv')) %>% subset(Peak2_type != 'Exonic')
+  link_df_pid <- read.csv(file=paste0(data_dir, cur_celltype, '_PiD_full_link_table.csv')) %>% subset(Peak2_type != 'Exonic')
+  # add column for the two peaks
+  link_df_ad$link <- paste0(link_df_ad$Peak1, '_', link_df_ad$Peak2)
+  link_df_pid$link <- paste0(link_df_pid$Peak1, '_', link_df_pid$Peak2)
+  # add missing links to each
+  missing_ad <- link_df_pid$link[!(link_df_pid$link %in% link_df_ad$link)]
+  missing_pid <- link_df_ad$link[!(link_df_ad$link %in% link_df_pid$link)]
+  link_df_ad[missing_ad,] <- NA
+  link_df_ad[missing_ad,'link'] <- missing_ad
+  link_df_ad[missing_ad,'coaccess'] <- 0
+  link_df_pid[missing_pid,] <- NA
+  link_df_pid[missing_pid,'link'] <- missing_pid
+  link_df_pid[missing_pid,'coaccess'] <- 0
+  # set rownames
+  rownames(link_df_pid) <- link_df_pid$link
+  rownames(link_df_ad) <- link_df_ad$link
+  # re-order so they match
+  link_df_pid <- link_df_pid[link_df_ad$link,]
+  all.equal(link_df_pid$link, link_df_ad$link)
+  plot_df <- data.frame(
+    link = link_df_ad$link,
+    coaccess_ad = link_df_ad$coaccess,
+    coaccess_pid = link_df_pid$coaccess
+  )
+  cor_list[cur_celltype] <- cor(link_df_pid$coaccess, link_df_ad$coaccess)
+  p <- plot_df %>%
+    ggplot(aes(x = coaccess_ad, y = coaccess_pid)) +
+    geom_hex(bins = 50) +
+    geom_abline(intercept=0, slope=1, linetype='dashed', color='black') +
+    scale_fill_gradientn(colors=rev(plasma(256)), trans="log") +
+    stat_cor(method='pearson') +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      panel.border = element_rect(colour = "black", fill=NA, size=1),
+      plot.title = element_text(hjust=0.5, face='bold')
+    ) +
+    xlab('AD coaccessibility') +
+    ylab('PiD coaccessibility') +
+    ggtitle(cur_celltype) +
+    coord_fixed() +
+    scale_x_continuous(limits=c(0,1), breaks=c(0,0.5,1)) +
+    scale_y_continuous(limits=c(0,1), breaks=c(0,0.5,1))
+    #guides(fill=guide_colorbar(ticks.colour = NA, ticks=NA, label=FALSE))
+  plot_list[[cur_celltype]] <- p + NoLegend()
+  pdf(paste0(fig_dir, 'coaccess_compare_pid_ad_', cur_celltype,'.pdf'), width=6,height=4)
+  print(p)
+  dev.off()
+}
+
+rev(order(unlist(cor_list)))
+pdf(paste0(fig_dir, 'coaccess_compare_pid_ad.pdf'), width=12,height=6)
+wrap_plots(plot_list[rev(order(unlist(cor_list)))], ncol=4)
+dev.off()
+
+
+
+
+```
