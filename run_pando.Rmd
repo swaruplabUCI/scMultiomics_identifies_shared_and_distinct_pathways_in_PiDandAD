@@ -1,0 +1,211 @@
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(ArchR)
+library(future.apply)
+library(ggpubr)
+library(reshape2)
+library(patchwork)
+library(RColorBrewer)
+library(Gviz)
+options(stringsAsFactors=FALSE)
+
+setwd("/dfs3b/swaruplab/smorabit/analysis/PiD_2021/GRN")
+
+################################################################################
+# Load single-cell data
+################################################################################
+
+seurat_atac<- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/data/NucSeq_macs2Peaks_signac.rds')
+# seurat_atac.cortex <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
+
+# load coembedding data
+seurat_coembed <- readRDS('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/coembedding/seurat_coembedding/data/NucSeq_coembed_seurat.rds')
+seurat_coembed <- subset(seurat_coembed, monocle_clusters_umap_ID != 'Unknown.a')
+
+# load snRNA-seq data:
+seurat_rna <- readRDS('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/NucSeq_batch_correct_seurat.rds')
+
+DefaultAssay(seurat_atac.cortex) <- 'RNA'
+
+# correction for coverage plot
+seurat_atac$monocle_clusters_umap_ID <- as.character(seurat_atac$monocle_clusters_umap_ID)
+
+# load ArchR project
+proj <- loadArchRProject(path = "/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+proj@peakSet$site_name2 <- paste0(as.character(seqnames(proj@peakSet)), ':', start(proj@peakSet), '-', end(proj@peakSet))
+
+################################################################################
+# Load ensembl db annotations
+################################################################################
+
+library(EnsDb.Hsapiens.v86)
+gene.coords <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == "protein_coding")
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+genebodyandpromoter.coords <- genebodyandpromoter.coords %>% subset(seqnames %in% c(1:22,'Y','X'))
+
+################################################################################
+# Load gl-cCREs, DA motifs, DEGs
+################################################################################
+
+load('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/cicero/update/data/top_link_df.rda')
+top_link_df$Peak2 <- sub(':', '-', as.character(top_link_df$Peak2))
+
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+```
+
+Setup data for Pando:
+```{r eval=FALSE}
+
+# get just atac from coembed
+coembed_atac <- seurat_coembed %>% subset(tech == 'atac')
+barcodes <- do.call(rbind, str_split(colnames(coembed_atac), '_'))[,3]
+
+# remove cells that aren't in coembed
+seurat_atac <- seurat_atac[,barcodes]
+coembed_atac <- coembed_atac[,barcodes %in% colnames(seurat_atac)]
+coembed_atac <- RenameCells(coembed_atac, new.names=colnames(seurat_atac))
+
+# add the RNA assay from coembed
+seurat_atac[['RNA']] <- coembed_atac[['RNA']]
+
+saveRDS(seurat_atac, 'data/pando_seurat_atac.rds')
+
+```
+
+Run Pando on Microglia data:
+
+```{r eval=FALSE}
+
+library(Pando)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(foreach)
+library(future)
+library(future.apply)
+library(JASPAR2020)
+library(TFBSTools)
+# plan('multiprocess', workers=8)
+library(doParallel)
+registerDoParallel(cores=16)
+
+# data(motifs)
+
+# exclude peaks that don't have any overlapping peaks:
+peak_ranges <- StringToGRanges(rownames(seurat_celltype))
+temp <- IRanges::intersect(peak_ranges, peak_ranges)
+keep_peaks <- peak_ranges %in% temp
+
+# seurat_celltype@assays$GeneActivity <- NULL
+seurat_copy <- seurat_celltype
+seurat_copy[['GeneActivity']] <- NULL
+seurat_copy <- seurat_copy[keep_peaks,]
+seurat_celltype[['peaks']] <- seurat_copy[['peaks']]
+rm(seurat_copy)
+
+# exclude Rik genes:
+seurat_copy <- seurat_celltype
+DefaultAssay(seurat_copy) <- 'RNA'
+seurat_copy[['peaks']] <- NULL
+seurat_copy <- seurat_copy[!grepl('Rik', rownames(seurat_copy)),]
+seurat_celltype[['RNA']] <- seurat_copy[['RNA']]
+rm(seurat_copy)
+# seurat_celltype <- subset(seurat_celltype, features=rownames(seurat_celltype)[keep_peaks])
+
+
+# this function intersects the given regions with the set of peaks, only if
+# the regions are specified and exclude_exons = FALSE
+#
+
+load('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/data/Annotations/hg38_mm10_ortho.rda')
+
+motif_names <- GetMotifData(seurat_obj, slot='motif.names')
+motif_names <- data.frame(
+  id = names(motif_names),
+  name = as.character(unlist(motif_names))
+)
+
+motif_conversion <- ensembl %>% subset(Gene.name %in% motif_names$name)
+motif_names <- motif_names[na.omit(match(motif_conversion$Gene.name, motif_names$name)),]
+motif_conversion$id <- motif_names$id
+
+motif_tfs <- select(motif_conversion, c(id, Mouse.gene.name))
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(species = 9606, all_versions = FALSE)
+)
+pfm <- pfm[motif_conversion$id]
+
+seurat_celltype <- initiate_grn(
+  seurat_celltype,
+  peak_assay = 'peaks',
+  rna_assay = 'RNA',
+  # regions = StringToGRanges(rownames(seurat_celltype)[1:1000]),
+  exclude_exons = TRUE
+)
+
+
+seurat_celltype <- find_motifs(
+    seurat_celltype ,
+    pfm = pfm,
+    genome = BSgenome.Mmusculus.UCSC.mm10,
+    motif_tfs = motif_tfs
+)
+
+
+
+# save here so I don't have to keep running this step
+saveRDS(seurat_celltype, paste0(data_dir, 'pando_seurat_MG_attempt3.rds'))
+seurat_celltype <- readRDS(paste0(data_dir, 'pando_seurat_MG_attempt3.rds'))
+
+seurat_celltype <- infer_grn(
+    seurat_celltype,
+    peak_to_gene_method = 'Signac',
+    method = 'glm',
+    verbose=2,
+    parallel=TRUE,
+    tf_cor=0.05
+)
+
+# Error in { : task 34 failed - "<text>:1:8: unexpected symbol
+# 1: 2610316D01Rik
+#            ^"
+
+saveRDS(seurat_celltype, paste0(data_dir, 'pando_seurat_MG_attempt3.rds'))
+
+coef(seurat_celltype)
+
+# extract regulatory modules:
+seurat_celltype <- find_modules(seurat_celltype)
+#
+# modules <- NetworkModules(seurat_celltype)
+# modules@meta
+# modules@features
+
+# re-load data
+seurat_celltype <- readRDS("/dfs3b/swaruplab/smorabit/collab/AMRF/analysis/ATAC/data/pando_seurat_MG_attempt3.rds")
+
+tab <- coef(seurat_celltype)
+modules <- NetworkModules(seurat_celltype)
+modules@meta
+modules@features

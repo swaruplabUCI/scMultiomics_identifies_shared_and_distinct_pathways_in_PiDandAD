@@ -1,0 +1,72 @@
+#!/bin/bash
+
+#SBATCH --job-name=cellranger-atac     ## Name of the job.
+#SBATCH -p standard          ## partition/queue name
+#SBATCH --nodes=1            ## (-N) number of nodes to use
+#SBATCH --ntasks=1          ## (-n) number of tasks to launch
+#SBATCH --cpus-per-task=32    ## number of cores the job needs
+#SBATCH --error=slurm-%J.err ## error log file
+#SBATCH --mem 64G              ## request 64GB of memory
+
+
+SAMPLEDIR="/dfs3/swaruplab/smorabit/collab/UCLA-scATAC/data/"
+TRANSCRIPTOME="/dfs3/swaruplab/smorabit/resources/cellranger-atac_reference/refdata-cellranger-atac-mm10-1.2.0/"
+FASTQS=($(ls $SAMPLEDIR/*.fastq.gz | cut -f 1 -d "_" | uniq))
+
+# index is just the
+let index="$1"
+tmp=$(basename ${FASTQS[$index]})
+SAMPLE=$(echo $tmp | cut -f 1 -d "_")
+
+# call cellranger count
+cellranger-atac count --id=$SAMPLE \
+                --fastqs=$SAMPLEDIR \
+                --reference=$TRANSCRIPTOME \
+                --sample=$SAMPLE \
+                --localcores=32 \
+                --localmem=64
+
+
+
+
+#!/bin/bash
+
+#SBATCH --job-name=cellranger-rna     ## Name of the job.
+#SBATCH -p standard          ## partition/queue name
+#SBATCH -A vswarup_lab           ## partition/queue name
+#SBATCH --nodes=1            ## (-N) number of nodes to use
+#SBATCH --ntasks=1          ## (-n) number of tasks to launch
+#SBATCH --cpus-per-task=32    ## number of cores the job needs
+#SBATCH --error=slurm-%J.err ## error log file
+#SBATCH --mem 64G              ## request 64GB of memory
+
+# to run this script:
+# sbatch cellranger-rna_count.sub 0
+
+SAMPLEDIR="/dfs3/swaruplab/smorabit/collab/AMRF/UCLA-snRNA/data/"
+TRANSCRIPTOME="/dfs3/swaruplab/smorabit/resources/cellranger_reference/refdata-gex-mm10-2020-A"
+FASTQS=($(ls $SAMPLEDIR/*.fastq.gz | cut -f 1 -d "_" | uniq))
+
+# index is just the
+let index="$1"
+tmp=$(basename ${FASTQS[$index]})
+SAMPLE=$(echo $tmp | cut -f 1 -d "_")
+
+# # call cellranger count
+# module load cellranger
+# cellranger count --id=$SAMPLE \
+#                  --fastqs=$SAMPLEDIR \
+#                  --transcriptome=$TRANSCRIPTOME \
+#                  --sample=$SAMPLE \
+#                  --localcores=32 \
+#                  --localmem=64 \
+#                  --expect-cells=10000
+
+TRANSCRIPTOME="/dfs3/swaruplab/smorabit/pipelines/sn-rna-seq/refdata-cellranger-mm10-3.0.0"
+cellranger count --id=$SAMPLE \
+                 --transcriptome=$TRANSCRIPTOME \
+                 --fastqs=$SAMPLEDIR \
+                 --sample=$SAMPLE\
+                 --localcores=32 \
+                 --localmem=32 \
+                 --expect-cells=10000

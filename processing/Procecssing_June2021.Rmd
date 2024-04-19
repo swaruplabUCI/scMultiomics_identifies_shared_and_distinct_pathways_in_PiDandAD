@@ -1,0 +1,2313 @@
+
+```{r eval=FALSE}
+
+# conda activate cicero
+library(ArchR)
+library(viridis)
+library(Seurat)
+library(Signac)
+library(tidyverse)
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/')
+
+# set archR genome
+addArchRGenome("hg38")
+addArchRThreads(threads = 32)
+
+proj <- loadArchRProject(path = "ArchR_with_AD")
+proj@peakSet %>% write.table('data/peak_table.csv', quote=FALSE, sep=',', row.names=FALSE)
+
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# re-load AD + PiD data:
+# combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-21.rds'))
+# combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_10-28-21.rds'))
+# combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_10-29-21.rds'))
+combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_11-01-21.rds'))
+
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+umap_theme_box <- theme(
+  axis.line=element_blank(),
+  axis.ticks=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+# combined$diagnosis <- ifelse(
+#   combined$Dataset == 'AD', as.character(combined$Diagnosis),
+#   as.character(combined$DX)
+# )
+# combined@meta.data[combined$celltype != 'mixed',] %>% .$diagnosis %>% table
+# combined@meta.data %>% .$diagnosis %>% table
+#
+#
+# combined@meta.data[combined$Dataset == 'AD' & combined$diagnosis == 'AD',] %>% .$Sample.ID %>% table
+# combined@meta.data[combined$Dataset == 'AD' & combined$diagnosis == 'Control',] %>% .$Sample.ID %>% table
+#
+#
+# combined@meta.data[combined$Dataset == 'PiD' & combined$diagnosis == "Pick's disease",] %>% .$Sample %>% table
+# combined@meta.data[combined$Dataset == 'PiD' & combined$diagnosis == 'Control',] %>% .$Sample%>% table
+
+
+```
+
+# create arrow files
+
+```{r eval=FALSE}
+
+
+cellranger_dir <-  '~/swaruplab/smorabit/data/PiD_2021/cellranger/'
+sample_names <- dir(cellranger_dir)
+
+# for now exclude samples 22 since they aren't done running:
+sample_names <- sample_names[!c(sample_names %in% c('Swarup_Lab_22'))]
+sample_files <- paste0(cellranger_dir, sample_names, '/outs/fragments.tsv.gz')
+
+
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = sample_files,
+  sampleNames = sample_names,
+  minTSS = 4, #Dont set this too high because you can always increase later
+  minFrags = 1000,
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+
+ArrowFiles <- dir('./')[grepl('.arrow', dir('./'))]
+
+# ## Compute Doublet Scores:
+# doubScores <- addDoubletScores(
+#   input = ArrowFiles,
+#   k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+#   knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search.
+#   LSIMethod = 1
+# )
+#
+# # add the other arrow files from the pilot:
+# ArrowFiles <- dir('./')[grepl('.arrow', dir('./'))]
+#
+# # exclude bad samples:
+# exclude <- paste0(c('Sample_8', 'Sample_12', 'Sample_19', 'Sample_20', 'Sample_21'), '.arrow')
+# ArrowFiles <- ArrowFiles[!(ArrowFiles %in% exclude)]
+
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR_pid",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+
+# add sample metadata:
+# sample_meta <- read.csv('~/swaruplab/smorabit/analysis/PiD_2021/data/sample_meta.csv')
+# sample_meta <- dplyr::select(sample_meta, c(SampleID, Assignment, BrainBank, Age, Sex, PMI, DX, Region))
+# sample_meta$SampleID <- ifelse(
+#   sample_meta$SampleID %in% c(1,2,3,4),
+#   paste0('Sample', sample_meta$SampleID),
+#   paste0('Sample_', sample_meta$SampleID)
+# )
+#
+# for(meta in names(sample_meta)){
+#   proj@cellColData[[meta]] <- sample_meta[match(as.character(proj@cellColData$Sample), sample_meta$SampleID), meta]
+# }
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+```
+
+QC cutoff:
+
+```{r eval=FALSE}
+
+proj <- loadArchRProject(path = "ArchR_pid")
+
+# which(proj$TSSEnrichment > 5 & proj$nFrags > 1500) %>% length
+#
+# proj@cellColData[which(proj$TSSEnrichment > 5 & proj$nFrags > 1500),] %>% .$Sample %>% table
+#
+# proj <- proj[which(proj$TSSEnrichment > 5 & proj$nFrags > 1500)]
+# table(proj$Sample)
+# nrow(proj@cellColData)
+
+table(proj$Sample) %>% names
+combined@meta.data %>% subset(Dataset=='PiD') %>% .$Sample %>% table
+
+seurat_samples <- (combined@meta.data %>% subset(Dataset=='PiD') %>% .$Sample %>% unique)
+seurat_samples <- gsub('_', '', seurat_samples)
+
+unique(proj$Sample) %in% seurat_samples
+
+```
+
+ArchR processing:
+
+```{r eval=FALSE}
+
+proj <- addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+# try to get gene activity matrix:
+gene_matrix <- getMatrixFromProject(proj, useMatrix='GeneScoreMatrix')
+gm <- assays(gene_matrix)$GeneScoreMatrix
+rownames(gm) <- gene_matrix@elementMetadata$name
+colnames(gm) <- rownames(proj@cellColData)
+
+
+# get the cells that we have in seurat:
+
+# add a barcode column to seurat obj :
+combined$barcode <- gsub("([0-9])", "", colnames(combined))
+combined$barcode <- gsub("([0-9])", "", combined$barcode)
+combined$barcode <- gsub("-", "", combined$barcode)
+combined$barcode <- gsub("_", "", combined$barcode)
+combined$barcode <- gsub("[Sample]", "", combined$barcode)
+
+
+proj@cellColData$barcode <- do.call(rbind, str_split(rownames(proj@cellColData), '#'))[,2]
+proj@cellColData$barcode <- do.call(rbind, str_split(proj@cellColData$barcode, "-"))[,1]
+
+
+# remove "-" and "_" from sample names:
+proj@cellColData$Sample_corrected <- gsub('Swarup_Lab_', 'Sample', proj@cellColData$Sample)
+proj@cellColData$Sample_corrected <- gsub('-', '', proj@cellColData$Sample_corrected)
+
+
+combined$Sample_combined <- ifelse(combined$Dataset == 'AD', as.character(combined$Sample.ID), as.character(combined$Sample))
+combined$Sample_corrected <- gsub('-', '', combined$Sample_combined)
+combined$Sample_corrected <- gsub('_', '', combined$Sample_corrected)
+
+# make sample barcode col
+proj@cellColData$Sample_barcode <- paste0(as.character(proj@cellColData$Sample_corrected), '_', proj@cellColData$barcode)
+combined$Sample_barcode <- paste0(combined$Sample_corrected, '_', combined$barcode)
+
+
+
+# subset cells from ArchR project:
+mapping <- match(combined$Sample_barcode, proj@cellColData$Sample_barcode) %>% unique
+cells_to_keep <- rownames(proj@cellColData)[mapping]
+cells_to_keep <- cells_to_keep[cells_to_keep %in% rownames(proj@cellColData)]
+
+sum(!is.na(cells_to_keep))
+sum(table(cells_to_keep) > 1)
+
+proj <-  subsetCells(proj, cells_to_keep)
+#proj <- proj[mapping]
+
+
+# try to get the gene matrix now
+gene_matrix <- getMatrixFromProject(proj, useMatrix='GeneScoreMatrix')
+
+```
+
+
+
+## Convert to Seurat/Signac format:
+
+* get the peak matrix
+* get the pseudo-expression matrix
+* get chromvar matrix
+* subset one sample only
+* create chromatin assay using that
+
+```{r eval=FALSE}
+
+# load AD dataset
+proj_AD <- loadArchRProject(path = "/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/all_samples/")
+
+# add peaks from AD dataset
+proj@peakSet <- proj_AD@peakSet
+proj <- addPeakMatrix(proj)
+proj <- saveArchRProject(ArchRProj = proj)
+
+# get peak matrix
+peak_matrix <- getMatrixFromProject(proj, useMatrix='PeakMatrix')
+pm <- assays(peak_matrix)$PeakMatrix
+
+################################################################################
+# Create seurat object
+################################################################################
+
+library(Seurat)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+
+cellranger_dir <- "/dfs3b/swaruplab/smorabit/data/PiD_2021/cellranger/"
+
+# get the gene annotation for the Seurat object
+annotations <- GetGRangesFromEnsDb(ensdb =  EnsDb.Hsapiens.v86)
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "hg38"
+
+
+samples <- unique(proj@cellColData$Sample)
+samples <- samples[order(samples)]
+fragment_files <- ifelse(
+  samples %in% paste0('Sample_', 1:4),
+  gsub(' ', '_', samples),
+  gsub('Sample_', 'Swarup_Lab_', samples)
+)
+
+fragment_files <- paste0(cellranger_dir, fragment_files, '/outs/fragments.tsv.gz')
+names(fragment_files) <- samples
+
+seurat_list <- lapply(samples, function(cur_sample){
+  print(cur_sample)
+
+  #cur_sample <- 'Sample4'
+  cur_fragments <- as.character(fragment_files[cur_sample])
+
+  cur_pm <- pm[,grepl(paste0(cur_sample, '#'), colnames(pm))]
+  cur_meta <- proj@cellColData %>% as.data.frame %>% subset(Sample == cur_sample)
+
+  # change colnames:
+  colnames(cur_pm) <- do.call(rbind, str_split(colnames(cur_pm), '#'))[,2]
+  rownames(cur_meta) <- do.call(rbind, str_split(rownames(cur_meta), '#'))[,2]
+  print(dim(cur_pm))
+
+  # create chromatin assay
+  cur_chromatin <- CreateChromatinAssay(
+    counts=cur_pm,
+    sep = c('-', '-'),
+    fragments=cur_fragments,
+    ranges=proj@peakSet,
+    genome='hg38',
+    annotation = annotations
+  )
+
+  # create a new Seurat obj with only the archR peaks:
+  cur_atac <- CreateSeuratObject(
+    cur_chromatin,
+    assay='peaks',
+    meta.data = cur_meta,
+  )
+
+})
+
+# merge objects
+seurat_obj <- merge(
+  x=seurat_list[[1]], y=seurat_list[2:length(seurat_list)],
+  add.cell.ids = samples
+)
+
+rm(seurat_list, pm); gc(); pryr::mem_used()
+
+
+```
+
+
+Signac / Seurat integrateion
+
+
+```{r eval=FALSE}
+
+library(future)
+plan("multiprocess", workers = 32)
+plan("sequential")
+
+
+# load AD dataset:
+NucSeq.atac <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/data/NucSeq_macs2Peaks_signac.rds')
+# NucSeq.atac.cortex <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
+
+# cells.keep <- intersect(colnames(NucSeq.atac), colnames(NucSeq.atac.cortex))
+#
+# lsi <- NucSeq.atac.cortex@reductions$lsi@cell.embeddings
+# lsi <- lsi[colnames(NucSeq.atac),]
+#
+# NucSeq.atac@reductions$lsi <- CreateDimReducObject(
+#   embeddings=lsi,
+#   assay='peaks'
+# )
+
+################################################################################
+# Data Processing
+################################################################################
+
+# process the AD data
+NucSeq.atac<- FindTopFeatures(NucSeq.atac, min.cutoff = 10)
+NucSeq.atac<- RunTFIDF(NucSeq.atac)
+NucSeq.atac <- RunSVD(NucSeq.atac)
+saveRDS(NucSeq.atac, paste0(data_dir, 'AD_atac_seurat.rds'))
+
+# process the PiD data
+seurat_obj <- FindTopFeatures(seurat_obj, min.cutoff = 10)
+seurat_obj <- RunTFIDF(seurat_obj)
+seurat_obj <- RunSVD(seurat_obj)
+seurat_obj <- FindNeighbors(object = seurat_obj, reduction = 'lsi', dims = 2:30)
+seurat_obj <- FindClusters(seurat_obj,algorithm = 3,resolution = 1,verbose = FALSE)
+saveRDS(seurat_obj, paste0(data_dir, 'PiD_atac_seurat.rds'))
+
+# merge datasets and process
+seurat_obj$Dataset <- 'PiD'
+NucSeq.atac$Dataset <- 'AD'
+combined <- merge(seurat_obj, NucSeq.atac)
+
+# process the combined dataset
+combined <- FindTopFeatures(combined, min.cutoff = 10)
+combined <- RunTFIDF(combined)
+combined <- RunSVD(combined)
+combined <- RunUMAP(combined, reduction = "lsi", dims = 2:30)
+
+################################################################################
+# Compute integration anchors and integrate embedding
+################################################################################
+
+# find integration anchors
+integration.anchors <- FindIntegrationAnchors(
+  object.list = list(NucSeq.atac, seurat_obj),
+  anchor.features = rownames(NucSeq.atac),
+  reduction = "rlsi",
+  dims = 2:30
+)
+
+saveRDS(integration.anchors, paste0(data_dir, 'PiD_AD_integration_anchors.rds'))
+
+
+# integrate LSI embeddings
+integrated <- IntegrateEmbeddings(
+  anchorset = integration.anchors,
+  reductions = combined[["lsi"]],
+  new.reduction.name = "integrated_lsi",
+  dims.to.integrate = 1:30
+)
+
+integrated <- RunUMAP(integrated, reduction = "integrated_lsi", dims = 2:30)
+
+# move UMAP:
+seurat_obj@reductions$integrated_umap <- CreateDimReducObject(
+  embeddings = integrated@reductions$umap@cell.embeddings[colnames(seurat_obj),],
+  assay='peaks'
+)
+
+################################################################################
+# Plot Integration Results
+################################################################################
+
+integrated$Dataset <- combined$Dataset[match(colnames(combined), colnames(integrated))]
+integrated$umap_label <- ifelse(
+  integrated$Dataset == 'PiD', 'PiD', integrated$monocle_clusters_umap_Cell.Type
+)
+combined$umap_label <- ifelse(
+  combined$Dataset == 'PiD', 'PiD', combined$monocle_clusters_umap_Cell.Type
+)
+
+p1 <- DimPlot(combined, group.by='umap_label', split.by='Dataset', label=TRUE) + NoLegend() + ggtitle('LSI') + umap_theme
+p2 <- DimPlot(integrated, group.by='umap_label', split.by='Dataset', label=TRUE) + NoLegend() + ggtitle('reciprocal LSI') + umap_theme
+
+pdf(paste0(fig_dir, 'umap_PiD_AD_integrated.pdf'), width=7, height=7)
+p1 /
+p2
+dev.off()
+
+
+
+################################################################################
+# compute transfer anchors
+################################################################################
+
+# find transfer anchors
+transfer.anchors <- FindTransferAnchors(
+  reference = NucSeq.atac,
+  query = seurat_obj,
+  reference.reduction = "lsi",
+  reduction = "lsiproject",
+  dims = 2:30
+)
+
+predictions.assay <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = NucSeq.atac$monocle_clusters_umap_Cell.Type,
+  prediction.assay = TRUE,
+  weight.reduction = seurat_obj[["lsi"]],
+  dims=2:30
+)
+
+seurat_obj[["predictions"]] <- predictions.assay
+
+################################################################################
+# Plot LT results:
+################################################################################
+
+
+DefaultAssay(seurat_obj) <- 'predictions'
+s
+
+prediction_df <- GetAssayData(seurat_obj, assay='predictions') %>% t %>% as.data.frame
+seurat_obj$max_prediction <- prediction_df$max
+table(seurat_obj$max_prediction >= 0.75)
+
+# plot histogram of LT scores
+pdf(paste0(fig_dir, 'prediction_score_max_histogram.pdf'), width=6, height=3, useDingbats=F)
+ggplot(prediction_df, aes(x=max)) +
+geom_histogram( position="identity", alpha=0.5)+
+geom_vline(xintercept=0.5) +
+ggtitle('Label Transfer max prediction score') +
+theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+# feature plot
+colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+plot_list <- FeaturePlot(seurat_obj, features=rownames(seurat_obj), combine=FALSE)
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + scale_color_gradientn(colors=colfunc(256)) + umap_theme
+}
+
+pdf(paste0(fig_dir, 'umap_label_transfer.pdf'), width=16, height=8)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+
+# DotPlot for all prediction scores:
+colfunc <- colorRampPalette(c(rev(brewer.pal(9, 'Purples' )[2:9]), 'white'))
+
+prediction_features <- rownames(seurat_obj)[order(rownames(seurat_obj))]
+# prediction_features <- prediction_features[prediction_features != 'max']
+p <- DotPlot(seurat_obj, features=prediction_features, group.by='seurat_clusters', dot.min=0.15 ) +
+  RotatedAxis() +
+    scale_color_gradientn( name='Prediction Score',
+    colors=rev(colfunc(256)),
+    guide = guide_colorbar(barwidth=0.5, barheight=20, ticks=FALSE, label=FALSE)
+) + coord_flip() +
+  ylab('') + xlab('')
+pdf(paste0(fig_dir, 'label_transfer_prediction_dotplot.pdf'), width=12, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+################################################################################
+# save everything:
+################################################################################
+
+for(meta in names(sample_meta)){
+  seurat_subset@meta.data[[meta]] <- sample_meta[match(as.character(seurat_subset$Sample), sample_meta$SampleID), meta]
+}
+
+saveRDS(NucSeq.atac, paste0(data_dir, 'AD_atac_seurat.rds'))
+saveRDS(seurat_obj, paste0(data_dir, 'PiD_atac_seurat.rds'))
+saveRDS(combined, paste0(data_dir, 'AD_PiD_combined_seurat.rds'))
+saveRDS(integrated, paste0(data_dir, 'AD_PiD_integrated_seurat.rds'))
+saveRDS(transfer.anchors, paste0(data_dir, 'transfer_anchors.rds'))
+
+```
+
+Additional plotting etc:
+
+```{r eval=FALSE}
+
+# correlation between depth and LSI
+pdf(paste0(fig_dir, 'lsi_depth_cor.pdf'), width=6, height=4)
+DepthCor(seurat_obj)
+dev.off()
+
+
+#plot clusters:
+p <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'umap_clusters.pdf'), width=7, height=7)
+p
+dev.off()
+
+#plot umap split by Sample
+p <- DimPlot(seurat_obj, group.by='seurat_clusters', split.by='Sample', label=TRUE, ncol=5) + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'umap_samples_split.pdf'), width=15, height=15)
+p
+dev.off()
+
+
+
+#plot cluster subset by LT max score
+p <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme
+p2 <- DimPlot(subset(seurat_obj, max_prediction >= 0.95), group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme + ggtitle('max_prediction >= 0.95')
+
+pdf(paste0(fig_dir, 'umap_clusters_subset.pdf'), width=10, height=5)
+p | p2
+dev.off()
+
+
+
+```
+
+Quick clustering analysis of PiD data using LT score >= 0.9
+
+```{r eval=FALSE}
+
+library(Harmony)
+
+seurat_subset <- subset(seurat_obj, max_prediction >= 0.95)
+seurat_subset <- FindTopFeatures(seurat_subset , min.cutoff = 10)
+seurat_subset  <- RunTFIDF(seurat_subset )
+seurat_subset  <- RunSVD(seurat_subset )
+seurat_subset <- RunHarmony(seurat_subset, group.by.vars='Sample', reduction='lsi', assay.use='peaks', project.dim=FALSE)
+
+# correlation between depth and LSI
+pdf(paste0(fig_dir, 'harmony_depth_cor.pdf'), width=6, height=4)
+DepthCor(seurat_subset, reduction='harmony')
+dev.off()
+
+seurat_subset <- RunUMAP(seurat_subset , reduction = "harmony", dims = 2:30)
+
+
+# clustering
+seurat_subset <- FindNeighbors(seurat_subset , reduction = 'harmony', dims = 2:30)
+seurat_subset <- FindClusters(seurat_subset ,algorithm = 3,resolution = 1,verbose = FALSE)
+
+
+#plot cluster
+p <- DimPlot(seurat_subset, group.by='seurat_clusters', label=TRUE, reduction='umap') + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'umap_clusters_filtered.pdf'), width=7, height=7)
+p
+dev.off()
+
+
+# save data:
+write.csv(seurat_subset@meta.data, paste0(data_dir, 'PiD_atac_seurat_filtered_meta.csv'), quote=FALSE)
+saveRDS(seurat_subset, paste0(data_dir, 'PiD_atac_seurat_filtered.rds'))
+
+
+```
+
+Additional Visualization
+
+```{r eval=FALSE}
+
+#plot umap split by Sample
+p <- DimPlot(seurat_subset, group.by='seurat_clusters', split.by='Sample', label=TRUE, ncol=5, reduction='umap') + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'umap_samples_split_filtered.pdf'), width=15, height=15)
+p
+dev.off()
+
+#plot umap split by Batch
+p <- DimPlot(seurat_subset, group.by='Sample', split.by='Assignment', ncol=5, reduction='umap') + umap_theme
+pdf(paste0(fig_dir, 'umap_batches_split_filtered.pdf'), width=15, height=5)
+p
+dev.off()
+
+#plot umap split by Diagnosis
+seurat_subset$DX_Sample <- paste0(seurat_subset$DX, '_', seurat_subset$Sample)
+p <- DimPlot(seurat_subset, group.by='DX_Sample', split.by='DX', ncol=5, reduction='umap') + umap_theme + theme(legend.position='bottom')
+pdf(paste0(fig_dir, 'umap_DX_split_filtered.pdf'), width=10, height=6)
+p
+dev.off()
+
+
+DefaultAssay(seurat_subset) <- 'predictions'
+colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+plot_list <- FeaturePlot(seurat_subset, features=rownames(seurat_obj), combine=FALSE, reduction='umap')
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + scale_color_gradientn(colors=colfunc(256)) + umap_theme
+}
+DefaultAssay(seurat_subset) <- 'peaks'
+
+pdf(paste0(fig_dir, 'umap_label_transfer_filtered.pdf'), width=16, height=8)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+
+```
+
+Cell Proportion Barplots:
+
+```{r eval=FALSE}
+
+
+df <- as.data.frame(table(seurat_subset$Sample))
+df$group <- factor(
+  as.character(seurat_subset@meta.data$DX)[match(as.character(df$Var1), seurat_subset@meta.data$Sample)],
+  levels = unique(seurat_subset$DX)
+)
+
+p <- ggplot(df, aes(x=reorder(Var1, Freq), y=Freq, fill=group, )) +
+  geom_bar(stat='identity') +
+  geom_text(aes(label=scales::comma(Freq, accuracy=1)),  color="black", size=3.5, hjust='inward') +
+  scale_y_continuous(labels=scales::comma) +
+  #scale_fill_manual(values=color.scheme) +
+  coord_flip() + RotatedAxis() + xlab('') +  ylab(expression(italic(N)[cells])) +
+#  ggtitle('Number of cells per sample in each condition') +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank()
+  )
+
+pdf(paste0(fig_dir, 'barplot_nCells_samples.pdf'), width=6, height=4)
+p
+dev.off()
+
+
+################################################################################
+# Proportion of Batch
+################################################################################
+
+cell_meta <- seurat_subset@meta.data
+variable <- 'Assignment'
+cluster_var <- 'seurat_clusters'
+clusters <- unique(cell_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(cell_meta[cell_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(cell_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "barplot_batch_proportions.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+#  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    legend.position='bottom'
+  )
+print(p)
+dev.off()
+
+
+################################################################################
+# Proportion of Sample
+################################################################################
+
+cell_meta <- seurat_subset@meta.data
+variable <- 'Sample'
+cluster_var <- 'seurat_clusters'
+clusters <- unique(cell_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(cell_meta[cell_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(cell_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "barplot_sample_proportions.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+#  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    legend.position='bottom'
+  )
+print(p)
+dev.off()
+
+
+################################################################################
+# Proportion of Diagnosis
+################################################################################
+
+cell_meta <- seurat_subset@meta.data
+variable <- 'DX'
+cluster_var <- 'seurat_clusters'
+clusters <- unique(cell_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(cell_meta[cell_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(cell_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "barplot_DX_proportions.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+#  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    legend.position='bottom'
+  )
+print(p)
+dev.off()
+
+
+```
+
+Test a coverage plot:
+
+```{r eval=FALSE}
+
+DefaultAssay(seurat_subset) <- 'peaks'
+
+
+seurat_plot <- subset(seurat_subset, seurat_clusters %in% c(
+  4,5,2,9,0,6,3,12,13
+))
+
+cov_plot1 <- Signac::CoveragePlot(
+  seurat_subset,
+  region='MOBP',
+  group.by='DX',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+cov_plot2 <- Signac::CoveragePlot(
+  seurat_subset,
+  region='CSF1R',
+  group.by='DX',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+pdf(paste0(fig_dir, "MOBP_coverage.pdf"), height=8, width=8)
+cov_plot1
+cov_plot2
+dev.off()
+
+```
+
+Remove outliers:
+
+* Sample_19
+* Sample_20
+* Sample_18
+* Sample_7
+* Sample_12
+* Sample_21
+
+* cluster 1
+
+
+```{r eval=FALSE}
+
+# remove tiny samples
+seurat_subset <- subset(seurat_subset, Sample %ni% c("Sample_19", 'Sample_20', 'Sample_18', 'Sample_7', 'Sample_12', 'Sample_21'))
+
+# remove cluster 1 (likely doublet based on high LT score from multiple cell types)
+seurat_subset <- subset(seurat_subset, seurat_clusters != 1)
+
+```
+
+Integrate the filtered PiD data with AD data using Harmony
+
+```{r eval=FALSE}
+
+# re-load AD dataset:
+NucSeq.atac <- readRDS(paste0(data_dir, 'AD_atac_seurat.rds'))
+
+# add column for Dataset
+seurat_subset$Dataset <- 'PiD'
+NucSeq.atac$Dataset <- 'AD'
+
+# add column for Batch in each dataset:
+seurat_subset$Batch <- paste0('PiD_Batch_', seurat_subset$Assignment)
+NucSeq.atac$Batch <- paste0('AD_Batch_', NucSeq.atac$Batch)
+
+combined <- merge(seurat_subset, NucSeq.atac)
+
+
+# process the combined dataset
+combined <- FindTopFeatures(combined, min.cutoff = 10)
+combined <- RunTFIDF(combined)
+combined <- RunSVD(combined)
+combined <- RunHarmony(combined, group.by.vars='Batch', reduction='lsi', assay.use='peaks', project.dim=FALSE)
+combined <- RunUMAP(combined, reduction = "harmony", dims = 2:30, min.dist=0.1, n.neighbors=15L)
+
+
+combined  <- FindNeighbors(combined , reduction = 'harmony', dims = 2:30)
+combined  <- FindClusters(combined , algorithm = 3, resolution = 0.3, verbose = FALSE)
+
+
+```
+
+
+Visualization
+
+```{r eval=FALSE}
+
+#plot umap split by Sample
+#combined$umap_color <- ifelse(combined$Dataset == 'AD', combined$monocle_clusters_umap_Cell.Type, combined$seurat_clusters)
+p <- DimPlot(combined, group.by='seurat_clusters', split.by='Dataset', label=TRUE, reduction='umap') + NoLegend() +
+theme(
+  axis.line=element_blank(),
+  axis.ticks=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+pdf(paste0(fig_dir, 'umap_integrated_filtered_clusters2.pdf'), width=10, height=5)
+p
+dev.off()
+
+
+p <- DimPlot(subset(combined, Dataset=='AD'), group.by='monocle_clusters_umap_Cell.Type', label=TRUE, reduction='umap') + NoLegend() +
+theme(
+  axis.line=element_blank(),
+  axis.ticks=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+pdf(paste0(fig_dir, 'umap_integrated_filtered_AD_celltype.pdf'), width=6, height=6)
+p
+dev.off()
+
+
+
+
+################################################################################
+# Number of cells per cluster
+################################################################################
+df <- as.data.frame(table((combined$seurat_clusters)))
+df$Var1 <- fct_rev(df$Var1)
+
+p1 <- ggplot(df, aes(x=Var1, y=Freq, fill=Var1)) +
+  geom_bar(stat='identity') + NoLegend() + RotatedAxis() + ylab(expression(italic(N)[cells])) + xlab('') +
+  geom_text(aes(label=scales::comma(Freq, accuracy=1)),  color="black", size=3.5, hjust='inward') +
+  scale_y_continuous(labels=scales::comma) +
+  coord_flip() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.ticks.x=element_blank(),
+  )
+
+
+pdf(paste0(fig_dir, 'barplot_nCells_clusters.pdf'), width=4, height=8)
+p1
+dev.off()
+
+
+################################################################################
+# Proportion of Batch
+################################################################################
+
+cell_meta <- combined@meta.data
+variable <- 'Batch'
+cluster_var <- 'seurat_clusters'
+clusters <- unique(cell_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(cell_meta[cell_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(cell_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "barplot_integrated_batch_proportions.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+#  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    legend.position='bottom'
+  )
+print(p)
+dev.off()
+
+
+
+################################################################################
+# Proportion of CellType from AD data
+################################################################################
+
+mixed_clusters <- c()
+
+cell_meta <- combined@meta.data %>% subset(Dataset=='AD')
+variable <- 'monocle_clusters_umap_Cell.Type'
+cluster_var <- 'seurat_clusters'
+clusters <- unique(cell_meta[[cluster_var]]) %>% as.character
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(cell_meta[cell_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df)
+  #cur_df <- as.data.frame(cur_df / table(cell_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+
+  # if the max is less than 0.75, add to the bad list:
+  if(max(cur_df$Freq) < 0.75){
+    print(clusters[i])
+    mixed_clusters <- c(mixed_clusters, clusters[i])
+  }
+
+}
+
+pdf(paste0(fig_dir, "barplot_integrated_AD_celltype_proportions_raw.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+#  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    legend.position='bottom'
+  )
+print(p)
+dev.off()
+
+
+
+# plot a umap highlighting mixed clusters:
+
+highlighted <- combined@meta.data %>% subset(seurat_clusters %in% mixed_clusters) %>% rownames
+combined@meta.data %>% subset(seurat_clusters %in% mixed_clusters) %>% .$Batch %>% table
+combined@meta.data %>% subset(seurat_clusters %ni% mixed_clusters & Dataset == 'PiD') %>% .$Sample %>% table
+
+
+# make a new col for the mixed group:
+combined$annotation <- ifelse(
+  colnames(combined) %in% highlighted, 'mixed',
+  as.character(combined$seurat_clusters)
+)
+
+p <- DimPlot(combined, group.by='seurat_clusters', cells.highlight=highlighted,label=TRUE, reduction='umap') + NoLegend() +
+umap_theme_box + ggtitle('')
+
+p1 <- DimPlot(combined, group.by='annotation', label=TRUE, reduction='umap') + NoLegend() +
+umap_theme_box + ggtitle('')
+
+
+pdf(paste0(fig_dir, 'umap_mixed_clusters.pdf'), width=10, height=5)
+p + p1 + plot_annotation(title='Clusters with < 75% of cells from one Cell Type', theme=theme(plot.title = element_text(hjust = 0.5))
+)
+dev.off()
+
+
+```
+
+Plot LT scores for PiD data next to the original cell types in AD
+
+```{r eval=FALSE}
+
+combined_pid <- subset(combined, Dataset == 'PiD')
+combined_ad <- subset(combined, Dataset == 'AD')
+
+
+DefaultAssay(combined_pid) <- 'predictions'
+colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+
+celltypes <- as.character(unique(combined_ad$monocle_clusters_umap_Cell.Type))
+
+
+plot_list <- list()
+pdf(paste0(fig_dir, 'umap_integrated_clusters_LT_scores.pdf'), width=10, height=5)
+for(i in 1:length(celltypes)){
+
+  cur_celltype <- celltypes[i]
+
+  p2 <- FeaturePlot(combined_pid, features=cur_celltype) + scale_color_gradientn(colors=colfunc(256)) + umap_theme_box + ggtitle('Prediction Score in PiD Dataset')
+
+  cur_highlighted <- combined_ad@meta.data %>% subset(monocle_clusters_umap_Cell.Type == cur_celltype) %>% rownames
+  p1 <- DimPlot(
+    combined_ad, group.by='monocle_clusters_umap_Cell.Type',
+    cells.highlight=cur_highlighted,label=TRUE, reduction='umap', repel=TRUE) + NoLegend() +
+  umap_theme_box + ggtitle('Annotation in AD Dataset')
+
+  patch <- p1 + p2 + plot_annotation(title=cur_celltype, theme=theme(plot.title = element_text(hjust = 0.5)))
+  print(patch)
+
+}
+dev.off()
+
+
+colfunc <- colorRampPalette(c(rev(brewer.pal(9, 'Purples' )[2:9]), 'white'))
+
+prediction_features <- rownames(combined_pid)[order(rownames(combined_pid))]
+# prediction_features <- prediction_features[prediction_features != 'max']
+p <- DotPlot(combined_pid, features=prediction_features, group.by='annotation', dot.min=0.15 ) +
+  RotatedAxis() +
+    scale_color_gradientn( name='Prediction Score',
+    colors=rev(colfunc(256)),
+    guide = guide_colorbar(barwidth=0.5, barheight=20, ticks=FALSE, label=FALSE)
+) + coord_flip() +
+  ylab('') + xlab('')
+pdf(paste0(fig_dir, 'integrated_label_transfer_prediction_dotplot.pdf'), width=12, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+
+```
+
+Annotate Clusters but leave the mixed cluster alone
+
+```{r eval=FALSE}
+
+anno_df <- read.csv(paste0(data_dir, 'cluster_annotations.csv'), stringsAsFactors=FALSE)
+combined$celltype <- anno_df$celltype[match(as.character(combined$seurat_clusters), anno_df$cluster)]
+
+# re-order factor levels:
+combined$celltype <- factor(
+  combined$celltype,
+  levels=c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC', 'PER.END', 'mixed')
+)
+
+pdf(paste0(fig_dir, 'umap_integrated_celltype_annotated.pdf'), width=10, height=5)
+DimPlot(
+  combined, group.by='celltype', split.by='Dataset',label=TRUE, reduction='umap', repel=TRUE) + NoLegend() +
+umap_theme_box + ggtitle('Cell Type Annotation split by Dataset')
+dev.off()
+
+```
+
+
+CoveragePlot for canonical markers used in AD paper:
+
+```{r eval=FALSE}
+
+genes <- c('GFAP', 'SLC17A7', 'GAD2', 'CSF1R', 'MBP', 'PDGFRA', 'VTN')
+
+
+cov_plot1 <- Signac::CoveragePlot(
+  subset(combined, Dataset == 'AD'),
+  region=genes[i],
+  group.by='celltype',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+cov_plot2 <- Signac::CoveragePlot(
+  subset(combined, Dataset == 'PiD'),
+  region=genes[i],
+  group.by='celltype',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+pdf(paste0(fig_dir, 'coverage_marker_genes_test.pdf'), width=5, height=8)
+cov_plot1 | cov_plot2
+dev.off()
+
+
+plot_list <- list()
+for(i in 1:length(genes)){
+  print(i)
+  plot_list[[i]] <- Signac::CoveragePlot(
+    combined,
+    region=genes[i],
+    group.by='celltype',
+    extend.upstream=1000,
+    extend.downstream=1000,
+    peaks=FALSE
+  )
+}
+
+pdf(paste0(fig_dir, 'coverage_marker_genes_test.pdf'), width=18, height=6)
+wrap_plots(plot_list, ncol=length(genes))
+dev.off()
+
+
+
+saveRDS(combined, file = paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-32_.rds'))
+combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-32_.rds'))
+
+```
+
+
+
+Remove the mixed groups and then re-process again!!!
+
+```{r eval=FALSE}
+
+combined <- subset(combined, celltype != 'mixed')
+
+
+combined <- RunUMAP(combined, reduction = "harmony", dims = 2:30, min.dist=0.2, n.neighbors=30L)
+
+
+# neighborhood & clusters
+combined <- FindNeighbors(combined , reduction = 'harmony', dims = 2:30, k.param=30L)
+combined <- FindClusters(combined , resolution = 0.3, verbose = FALSE, graph.name='peaks_snn')
+combined$cluster_res_0.3 <- combined$seurat_clusters
+combined <- FindClusters(combined , algorithm = 3, resolution = 0.75, verbose = FALSE, graph.name='peaks_snn')
+combined$cluster_res_0.75 <- combined$seurat_clusters
+combined <- FindClusters(combined , algorithm = 3, resolution = 1, verbose = FALSE, graph.name='peaks_snn')
+combined$cluster_res_1 <- combined$seurat_clusters
+combined <- FindClusters(combined , algorithm = 3, resolution = 0.5, verbose = FALSE, graph.name='peaks_snn')
+combined$cluster_res_0.5 <- combined$seurat_clusters
+
+
+
+#
+#
+# combined$SampleID <- ifelse(
+#   combined$Dataset == 'AD',
+#   paste0('AD_',as.character(combined$Sample.ID)),
+#   paste0('PiD_', as.character(combined$Sample))
+# )
+#
+# # process the combined dataset
+# combined <- FindTopFeatures(combined, min.cutoff = 10)
+# combined <- RunTFIDF(combined)
+# combined <- RunSVD(combined)
+# combined <- RunHarmony(combined, group.by.vars=c('Batch'), reduction='lsi', assay.use='peaks', project.dim=FALSE)
+# # combined <- RunUMAP(combined, reduction = "harmony", dims = 2:30, min.dist=0.1, n.neighbors=15L)
+# combined <- RunUMAP(combined, reduction = "harmony", dims = 2:30)
+
+
+# combined  <- FindNeighbors(combined , reduction = 'harmony', dims = 2:30)
+# combined  <- FindClusters(combined , algorithm = 3, resolution = 0.3, verbose = FALSE)
+
+
+#plot umap split by Batch
+p <- DimPlot(combined, group.by='celltype',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p2 <- DimPlot(combined, group.by='Dataset',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p3 <- DimPlot(combined, group.by='Batch',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed3.pdf'), width=10, height=10)
+p
+p2
+p3
+dev.off()
+
+
+p1 <- DimPlot(combined, group.by='cluster_res_0.3',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p2 <- DimPlot(combined, group.by='cluster_res_0.5',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p3 <- DimPlot(combined, group.by='cluster_res_0.75',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p4 <- DimPlot(combined, group.by='cluster_res_1',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_clusters.pdf'), width=12, height=12)
+(p1 + p2) / (p3 + p4)
+dev.off()
+
+
+saveRDS(combined, paste0(data_dir, 'PiD_AD_integrated_in_progress_10-28-21.rds'))
+
+
+
+# plot each cluster as its own highlighted
+
+cluster_name <- 'cluster_res_0.5'
+clusters <- as.character(unique(combined@meta.data[[cluster_name]]))
+clusters <- clusters[order(clusters)]
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_clusters_highlight.pdf'), width=6, height=6, useDingbats=FALSE)
+for(cluster in clusters){
+  print(cluster)
+  p <- DimPlot(combined, group.by=cluster_name, label=TRUE, raster=TRUE, cells.highlight=colnames(combined)[combined$cluster_res_0.5 == cluster]) + ggtitle(cluster)
+  print(p)
+}
+dev.off()
+
+################################################################################
+# remove cluster 12 and re-do UMAP
+################################################################################
+
+combined <- subset(combined, cluster_res_0.5 != "12")
+
+p <- DimPlot(combined, group.by='celltype',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_celltype.pdf'), width=10, height=10)
+p
+dev.off()
+
+
+
+combined <- RunUMAP(combined, reduction = "harmony", dims = 2:30, min.dist=0.35, n.neighbors=35L)
+
+
+p <- DimPlot(combined, group.by='celltype',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_celltype_update.pdf'), width=7, height=7)
+p
+dev.off()
+
+
+
+p1 <- DimPlot(combined, group.by='cluster_res_0.3',reduction='umap', label=TRUE, raster=TRUE) + umap_theme + NoLegend()
+p2 <- DimPlot(combined, group.by='cluster_res_0.5',reduction='umap', label=TRUE, raster=TRUE) + umap_theme + NoLegend()
+p3 <- DimPlot(combined, group.by='cluster_res_0.75',reduction='umap', label=TRUE, raster=TRUE) + umap_theme + NoLegend()
+p4 <- DimPlot(combined, group.by='cluster_res_1',reduction='umap', label=TRUE, raster=TRUE) + umap_theme + NoLegend()
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_clusters.pdf'), width=12, height=12, useDingbats=FALSE)
+(p1 + p2) / (p3 + p4)
+dev.off()
+
+
+
+
+
+# plot each cluster as its own highlighted
+
+cluster_name <- 'cluster_res_0.5'
+clusters <- as.character(unique(combined@meta.data[[cluster_name]]))
+clusters <- clusters[order(clusters)]
+pdf(paste0(fig_dir, 'umap_celltypes_nomixed_clusters_highlight.pdf'), width=6, height=6, useDingbats=FALSE)
+for(cluster in clusters){
+  print(cluster)
+  p <- DimPlot(combined, group.by=cluster_name, label=TRUE, raster=TRUE, cells.highlight=colnames(combined)[combined$cluster_res_0.5 == cluster]) + ggtitle(cluster)
+  print(p)
+}
+dev.off()
+
+saveRDS(combined, paste0(data_dir, 'PiD_AD_integrated_in_progress_10-29-21.rds'))
+
+
+
+```
+
+Cell-type annotation using the final clusters with resolution 0.5:
+
+```{r eval=FALSE}
+
+
+
+anno_df <- read.csv(paste0(data_dir, 'final_cluster_annotations.csv'), stringsAsFactors=FALSE)
+combined$celltype <- anno_df$celltype[match(as.character(combined$cluster_res_0.5), anno_df$cluster)]
+combined$cluster_name <- anno_df$cluster_name[match(as.character(combined$cluster_res_0.5), anno_df$cluster)]
+
+# re-order factor levels:
+combined$celltype <- factor(
+  combined$celltype,
+  levels=c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC', 'PER.END')
+)
+
+# plot the final annotated umap:
+
+p1 <- DimPlot(combined, group.by='celltype',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+p2 <- DimPlot(combined, group.by='cluster_name',reduction='umap', label=TRUE, raster=FALSE) + umap_theme + NoLegend()
+pdf(paste0(fig_dir, 'umap_celltypes_final_clusters.pdf'), width=12, height=6, useDingbats=FALSE)
+(p1 + p2)
+dev.off()
+
+
+saveRDS(combined, paste0(data_dir, 'PiD_AD_integrated_in_progress_11-01-21.rds'))
+
+
+```
+
+Re-compute gene activity
+
+```{r eval=FALSE}
+
+```
+
+Harmonize the meta-data from the two studies:
+
+```{r eval=FALSE}
+
+```
+
+
+
+
+Test a coverage plot:
+
+```{r eval=FALSE}
+
+DefaultAssay(combined) <- 'peaks'
+
+
+cur_gene <- 'GFAP'
+cov_plot1 <- Signac::CoveragePlot(
+  combined %>% subset(Dataset == 'PiD'),
+  region=cur_gene,
+  group.by='cluster_name',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+cov_plot2 <- Signac::CoveragePlot(
+  combined %>% subset(Dataset == 'AD'),
+  region=cur_gene,
+  group.by='cluster_name',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+pdf(paste0(fig_dir, "test_coverage_AQP4.pdf"), height=10, width=5)
+cov_plot1
+cov_plot2
+dev.off()
+
+```
+
+
+
+
+Test plotting gene activity
+
+
+```{r eval=FALSE}
+
+library(Nebulosa)
+
+DefaultAssay(combined) <- 'Activity'
+
+# yeah this really doesn't look good!
+p1 <- Nebulosa::plot_density(combined, adjust=5, c('CSF1R', 'GFAP', 'SLC17A7', 'PDGFRA', 'MOG', 'GAD1'), pal='magma') # , pal = colfunc(256))
+
+pdf(paste0(fig_dir, 'featureplot_marker_genes.pdf'), width=16, height=12)
+p1 + plot_layout(ncol=3) + NoLegend()
+dev.off()
+
+colfunc <- colorRampPalette(c('white', (brewer.pal(9, 'Purples' )[2:9]) ))
+
+
+
+
+
+```
+
+
+ChromVAR:
+
+```{r eval=FALSE}
+
+DefaultAssay(combined) <- 'peaks'
+
+################################################################################
+# ChromVAR motif enrichment analysis
+################################################################################
+
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(species = 9606, all_versions = FALSE)
+)
+
+# add motif information
+combined <- AddMotifs(
+  object = combined,
+  genome = BSgenome.Hsapiens.UCSC.hg38,
+  pfm = pfm
+)
+
+# run chromvar
+combined <- RunChromVAR(
+  object = combined,
+  genome = BSgenome.Hsapiens.UCSC.hg38
+)
+
+saveRDS(combined, paste0(data_dir, 'PiD_AD_integrated_in_progress_11-01-21.rds'))
+
+
+```
+ -->
+
+
+
+
+
+Re-compute gene activity after all the filtering has been done:
+
+```{r eval=FALSE}
+
+```
+
+
+
+
+
+
+
+################################################################################
+#
+#
+#
+#
+# Below is the danger zone
+#
+#
+#
+#
+#
+
+################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ignore all of this stuff, I was trying to see if gene activity from ArchR looks
+any better but it was still meh
+
+Make archR project with AD to see if the gene activity looks okay:
+
+```{r eval=FALSE}
+
+AD_arrow_files_dir <- '~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/'
+PiD_arrow_files_dir <- "~/swaruplab/smorabit/analysis/PiD_2021/"
+
+# don't include the samples that we yeeted:
+bad_samples <- paste0(c('Sample_19', 'Sample_20', 'Sample_18', 'Sample_7', 'Sample_12', 'Sample_21', 'Sample_23'), '.arrow')
+
+
+arrow_files <- paste0(AD_arrow_files_dir, dir(AD_arrow_files_dir)[grepl('.arrow', dir(AD_arrow_files_dir))])
+# pid_arrow_files <- dir(PiD_arrow_files_dir)[grepl('.arrow', dir(PiD_arrow_files_dir))]
+# pid_arrow_files <- pid_arrow_files[pid_arrow_files %ni% bad_samples ]
+# arrow_files <- c(arrow_files,
+#  paste0(PiD_arrow_files_dir, pid_arrow_files)
+# )
+
+
+proj_combined <- ArchRProject(
+  ArrowFiles = arrow_files,
+  outputDirectory = "ArchR_with_AD",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+proj_combined <- saveArchRProject(ArchRProj = proj_combined)
+
+
+
+
+
+
+
+```
+
+Get gene activity matrix from AD object and from PiD object:
+
+Note that this does not work if you load two different archr projects,
+you have to do it one at a time in different R sessions.
+
+```{r eval=FALSE}
+
+library(ArchR)
+
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/')
+
+# set archR genome
+addArchRGenome("hg38")
+addArchRThreads(threads = 32)
+
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+
+# proj <- loadArchRProject(path='ArchR_pid')
+#
+#
+# # get gene matrix for PiD
+# gene_matrix <- getMatrixFromProject(proj, useMatrix='GeneScoreMatrix')
+# gm <- assays(gene_matrix)$GeneScoreMatrix
+# rownames(gm) <- gene_matrix@elementMetadata$name
+# colnames(gm) <- rownames(proj@cellColData)
+# gm_pid <- gm
+# saveRDS(gm_pid, paste0(data_dir, 'archr_gene_activity_PiD_unfiltered.rds'))
+
+
+proj_AD <- loadArchRProject(path = "ArchR_with_AD")
+
+# get gene matrix for AD:
+gene_matrix <- getMatrixFromProject(proj_AD, useMatrix='GeneScoreMatrix')
+gm <- assays(gene_matrix)$GeneScoreMatrix
+rownames(gm) <- gene_matrix@elementMetadata$name
+colnames(gm) <- rownames(proj_AD@cellColData)
+gm_ad <- gm
+saveRDS(gm_ad, paste0(data_dir, 'archr_gene_activity_AD_unfiltered.rds'))
+
+
+
+```
+
+Put the two gene activity matrices together
+
+* load the matrices
+* subset each one by cells that are in the seurat obj
+* combine and re-order by seurat obj
+* add to seurat obj
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+
+
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# re-load AD + PiD data:
+combined <- readRDS(paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-32_.rds'))
+
+
+# re-load unfiltered matrices:
+gm_pid <- readRDS(paste0(data_dir, 'archr_gene_activity_PiD_unfiltered.rds'))
+gm_ad <- readRDS(paste0(data_dir, 'archr_gene_activity_AD_unfiltered.rds'))
+all.equal(rownames(gm_pid), rownames(gm_ad))
+
+
+
+
+# add a barcode column to seurat obj :
+combined$barcode <- gsub("([0-9])", "", colnames(combined))
+combined$barcode <- gsub("([0-9])", "", combined$barcode)
+combined$barcode <- gsub("-", "", combined$barcode)
+combined$barcode <- gsub("_", "", combined$barcode)
+combined$barcode <- gsub("[Sample]", "", combined$barcode)
+combined$Sample_combined <- ifelse(combined$Dataset == 'AD', as.character(combined$Sample.ID), as.character(combined$Sample))
+combined$Sample_corrected <- gsub('-', '', combined$Sample_combined)
+combined$Sample_corrected <- gsub('_', '', combined$Sample_corrected)
+combined$Sample_barcode <- paste0(combined$Sample_corrected, '_', combined$barcode)
+
+# somehow there are some sample barcode combinations that are duplicated???
+sum(table(combined$Sample_barcode)>1)
+
+
+# subset pid first:
+
+pid_df <- data.frame(
+  'Sample' = do.call(rbind, str_split(colnames(gm_pid), '#'))[,1],
+  'barcode' = do.call(rbind, str_split(colnames(gm_pid), '#'))[,2],
+  stringsAsFactors=FALSE
+)
+pid_df$Sample <- gsub('Swarup_Lab_', 'Sample', pid_df$Sample)
+pid_df$barcode <- do.call(rbind, str_split(pid_df$barcode, '-'))[,1]
+pid_df$Sample_barcode <- paste0(pid_df$Sample, '_', pid_df$barcode)
+pid_df$keep <- pid_df$Sample_barcode %in% combined$Sample_barcode
+sum(pid_df$keep)
+
+colnames(gm_pid) <- pid_df$Sample_barcode
+gm_pid <- gm_pid[,pid_df$keep]
+
+
+# subset AD :
+ad_df <- data.frame(
+  'Sample' = do.call(rbind, str_split(colnames(gm_ad), '#'))[,1],
+  'barcode' = do.call(rbind, str_split(colnames(gm_ad), '#'))[,2],
+  stringsAsFactors=FALSE
+)
+ad_df$Sample <- gsub('-', '', ad_df$Sample)
+ad_df$barcode <- do.call(rbind, str_split(ad_df$barcode, '-'))[,1]
+ad_df$Sample_barcode <- paste0(ad_df$Sample, '_', ad_df$barcode)
+ad_df$keep <- ad_df$Sample_barcode %in% combined$Sample_barcode
+sum(ad_df$keep)
+
+colnames(gm_ad) <- ad_df$Sample_barcode
+gm_ad <- gm_ad[,ad_df$keep]
+
+# combine AD and PiD gene activity matrices:
+
+gm <- cbind(gm_ad, gm_pid)
+
+# re-order columns by cells in seurat obj
+gm<- gm[,combined$Sample_barcode]
+colnames(gm) <- colnames(combined)
+# finally add it to the seurat object:
+combined[['GeneScore']] <- CreateAssayObject(counts=gm)
+combined <- NormalizeData(
+  combined, assay='GeneScore', normalization.method='LogNormalize',
+  scale.factor = median(combined$nCount_GeneScore)
+)
+
+#saveRDS(combined, file = paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-32_.rds'))
+
+
+library(viridis)
+library(RColorBrewer)
+library(patchwork)
+library(Nebulosa)
+
+# plot marker genes:
+genes <- c('AQP4', 'SNAP25', 'GAD2', 'CSF1R', 'MOBP', 'PDGFRA')
+
+DefaultAssay(combined) <- 'GeneScore'
+colfunc <- colorRampPalette(c( 'white' ,rev(magma(10)[2:9])))
+#colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+plot_list <- FeaturePlot(combined, features=genes, combine=FALSE, reduction='umap', order=TRUE)
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + scale_color_gradientn(colors=colfunc(256)) + umap_theme_box
+}
+
+pdf(paste0(fig_dir, 'featureplot_archr_genescore_marker_genes.pdf'), width=9, height=6)
+wrap_plots(plot_list, ncol=3)
+dev.off()
+
+
+p <- Nebulosa::plot_density(combined, features='MOG', reduction='umap')
+p <- FeaturePlot(combined, split.by='Dataset', features='MOG', reduction='umap', order=TRUE)
+pdf(paste0(fig_dir, 'featureplot_archr_genescore_marker_genes.pdf'), width=10, height=5)
+p
+dev.off()
+
+
+
+
+# plot promoter region of a few genes:
+
+
+
+
+```
+
+
+```{r eval=FALSE}
+
+
+# keep only cells that we have in seurat obj
+cells_to_keep <- rownames(proj_combined@cellColData)[gsub('#', '_', rownames(proj_combined@cellColData)) %in% colnames(combined)]
+#proj_combined <- subsetCells(proj_combined, cells_to_keep)
+
+proj_combined@cellColData %>% as.data.frame %>% subset(Sample == 'Sample101') %>% rownames %>% head
+combined@meta.data %>% subset(Dataset=='AD') %>% rownames %>% head
+
+
+# add a barcode column to seurat obj :
+combined$barcode <- gsub("([0-9])", "", colnames(combined))
+combined$barcode <- gsub("([0-9])", "", combined$barcode)
+combined$barcode <- gsub("-", "", combined$barcode)
+combined$barcode <- gsub("_", "", combined$barcode)
+combined$barcode <- gsub("[Sample]", "", combined$barcode)
+
+# add barcode column to archr project:
+proj_combined@cellColData$barcode <- do.call(rbind, str_split(rownames(proj_combined@cellColData), '#'))[,2]
+proj_combined@cellColData$barcode <- do.call(rbind, str_split(proj_combined@cellColData$barcode, "-"))[,1]
+
+
+# remove "-" and "_" from sample names:
+proj_combined@cellColData$Sample_corrected <- gsub('_', '', proj_combined@cellColData$Sample)
+proj_combined@cellColData$Sample_corrected <- gsub('-', '', proj_combined@cellColData$Sample_corrected)
+
+
+combined$Sample_combined <- ifelse(combined$Dataset == 'AD', as.character(combined$Sample.ID), as.character(combined$Sample))
+combined$Sample_corrected <- gsub('-', '', combined$Sample_combined)
+combined$Sample_corrected <- gsub('_', '', combined$Sample_corrected)
+
+# make sample barcode col
+proj_combined@cellColData$Sample_barcode <- paste0(as.character(proj_combined@cellColData$Sample_corrected), '_', proj_combined@cellColData$barcode)
+combined$Sample_barcode <- paste0(combined$Sample_corrected, '_', combined$barcode)
+
+
+
+# subset cells from ArchR project:
+mapping <- match(combined$Sample_barcode, proj_combined@cellColData$Sample_barcode)
+cells_to_keep <- rownames(proj_combined@cellColData)[mapping]
+
+#proj_combined <-  subsetCells(proj_combined, cells_to_keep)
+proj_combined <- proj_combined[mapping]
+
+
+# move UMAP and metadata info from seurt:
+# set UMAP coordinates:
+umap <- combined@reductions$umap@cell.embeddings[match(proj_combined@cellColData$Sample_barcode, combined$Sample_barcode),]
+rownames(umap) <- rownames(proj_combined@cellColData)
+colnames(umap) <- paste0('harmony#UMAP_Dimension_', 1:2)
+proj_combined@embeddings$UMAP$df <- umap
+
+# move cluster info:
+proj_combined@cellColData$celltype <- combined$celltype[match(proj_combined@cellColData$Sample_barcode, combined$Sample_barcode)]
+
+pdf('figures/ArchR_umap_aligned_celltype.pdf', width=8, height=8)
+plotEmbedding(ArchRProj = proj_combined, colorBy = "cellColData", name = "celltype", embedding = "UMAP")
+dev.off()
+
+```
+
+Processing with archr
+
+```{r eval=FALSE}
+
+which(proj_combined$TSSEnrichment > 6 & proj$nFrags > 3000) %>% length
+
+proj_combined<- proj_combined[which(proj_combined$TSSEnrichment > 5 & proj_combined$nFrags > 1500)]
+
+proj_combined <- addIterativeLSI(proj_combined, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+
+#proj_combined <- saveArchRProject(ArchRProj = proj_combined)
+
+#proj_combined <- loadArchRProject(path = "ArchR_with_AD")
+
+
+################################################################################
+# Plot Gene Activity with ArchR
+################################################################################
+
+harmony_mat <- combined@reductions$harmony@cell.embeddings[match(proj_combined@cellColData$Sample_barcode, combined$Sample_barcode),]
+colnames(harmony_mat) <- paste0("LSI", 1:ncol(harmony_mat))
+rownames(harmony_mat) <- rownames(proj_combined@cellColData)
+proj_combined@reducedDims$Harmony$matDR <- harmony_mat
+
+# imputation weights using MAGIC
+proj_combined <- addImputeWeights(proj_combined, reducedDims="Harmony", dimsToUse=2:30, scaleDims=FALSE)
+
+
+canonical_markers <- list(
+  'Astrocyte' = c('GFAP', 'AQP4', 'SLC1A2'),
+  'Pan-neuronal' = c('SNAP25', 'SYT1'),
+  'Excitatory_Neuron' = c('SLC17A7', 'SATB2'),
+  'Inhibitory_Neuron' = c('GAD1', 'GAD2'),
+  'Microglia' = c('CSF1R', 'CD74', 'P2RY12'),
+  'Oligodendrocyte' = c('MOBP', 'MBP', 'MOG'),
+  'Olig_Progenitor' = c('PDGFRA', 'CSPG4')
+)
+
+
+# without imputation
+p <- plotEmbedding(
+    ArchRProj = proj_combined,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = NULL,
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-without-Imputation.pdf",
+    ArchRProj = proj_combined,
+    addDOC = FALSE, width = 5, height = 5)
+
+
+```
+
+
+
+
+
+
+Compute Gene Activity
+
+```{r eval=FALSE}
+
+
+gene.activities <- GeneActivity(combined)
+combined[['Activity']] <- CreateAssayObject(counts=gene.activities)
+combined <- NormalizeData(
+  combined, assay='Activity', normalization.method='LogNormalize',
+  scale.factor = median(combined$nCount_Activity)
+)
+
+saveRDS(combined, file = paste0(data_dir, 'PiD_AD_integrated_in_progress_06-04-32_.rds'))
+
+
+# plot marker genes:
+genes <- c('AQP4', 'SNAP25', 'GAD2', 'CSF1R', 'MOBP', 'PDGFRA')
+
+DefaultAssay(combined) <- 'Activity'
+colfunc <- colorRampPalette(c( 'white' ,rev(magma(10)[2:9])))
+colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+plot_list <- FeaturePlot(combined, features=genes, combine=FALSE, reduction='umap', order=TRUE, max.cutoff='q95')
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + scale_color_gradientn(colors=colfunc(256)) + umap_theme_box
+}
+
+pdf(paste0(fig_dir, 'featureplot_marker_genes_AD.pdf'), width=9, height=6)
+wrap_plots(plot_list, ncol=3)
+dev.off()
+
+genes <- c('AQP4', 'SNAP25', 'GAD2', 'CSF1R', 'PLP1', 'PDGFRA', 'FLT1')
+p <- DotPlot(combined, features=genes, group.by='celltype') + RotatedAxis()
+pdf(paste0(fig_dir, 'vlnplot_marker_genes_AD.pdf'), width=8, height=4)
+p
+dev.off()
+
+
+```
+
+ChromVAR:
+
+```{r eval=FALSE}
+
+
+################################################################################
+# ChromVAR motif enrichment analysis
+################################################################################
+
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+# Get a list of motif position frequency matrices from the JASPAR database
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(species = 9606, all_versions = FALSE)
+)
+
+# add motif information
+combined <- AddMotifs(
+  object = combined,
+  genome = BSgenome.Hsapiens.UCSC.hg38,
+  pfm = pfm
+)
+
+# run chromvar
+combined <- RunChromVAR(
+  object = combined,
+  genome = BSgenome.Hsapiens.UCSC.hg38
+)
+
+```
+
+
+
+
+Make a new ArchR project filtering out the low LT cells
+
+```{r eval=FALSE}
+
+ArrowFiles <- dir('./')[grepl('.arrow', dir('./'))]
+
+
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR_filtered",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+
+# add sample metadata:
+sample_meta <- read.csv('~/swaruplab/smorabit/analysis/PiD_2021/data/sample_meta.csv')
+sample_meta <- dplyr::select(sample_meta, c(SampleID, Assignment, BrainBank, Age, Sex, PMI, DX, Region))
+sample_meta$SampleID <- ifelse(
+  sample_meta$SampleID %in% c(1,2,3,4),
+  paste0('Sample', sample_meta$SampleID),
+  paste0('Sample_', sample_meta$SampleID)
+)
+
+for(meta in names(sample_meta)){
+  proj@cellColData[[meta]] <- sample_meta[match(as.character(proj@cellColData$Sample), sample_meta$SampleID), meta]
+}
+
+# remove cells based on AD integration:
+seurat_obj <- readRDS(paste0(data_dir, 'PiD_atac_seurat_filtered.rds'))
+cells_to_keep <- rownames(proj@cellColData)[gsub('#', '_', rownames(proj@cellColData)) %in% colnames(seurat_obj)]
+proj <- subsetCells(proj, cells_to_keep)
+
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## Primary Data processing
+
+```{r eval=FALSE}
+
+# LSI
+proj <- addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+# batch correction with Harmony:
+proj <- addHarmony(
+  proj, reducedDims = "IterativeLSI",
+  name = 'Harmony', groupBy='Sample', force=TRUE
+)
+
+# Seurat clustering:
+proj <- addClusters(input = proj, reducedDims = "Harmony", force=TRUE)
+
+# UMAP:
+proj <- addUMAP(ArchRProj = proj, reducedDims = "Harmony", force=TRUE, minDist=0.05)
+
+
+# plot UMAP by cluster and sample
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+p3 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DX", embedding = "UMAP")
+
+plotPDF(p1,p2,p3, name = "qc_filtered-UMAP-Sample-Clusters.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "nFrags", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "TSSEnrichment", embedding = "UMAP")
+
+plotPDF(p1,p2, name = "qc_filtered-UMAP-qc.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+
+```
+
+plot umap with facet wrap:
+
+```{r eval=FALSE}
+
+proj@cellColData$UMAP1 <- proj@embeddings$UMAP$df[,1]
+proj@cellColData$UMAP2 <- proj@embeddings$UMAP$df[,2]
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=Sample)) +
+  geom_point(alpha=0.25, size=0.25)
+
+pdf('EDA_no_bad/Plots/umap_samples_split.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# TSS enrichment
+###############################################################################
+
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(TSSEnrichment))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_tssEnrich.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# Reads in promoter
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(ReadsInPromoter))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_ReadsInPromoter.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# Reads in blacklist
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(ReadsInBlacklist))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_ReadsInBlacklist.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# nFrags
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(nFrags))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_nFrags.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+###############################################################################
+# NucleosomeRatio
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=NucleosomeRatio)) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_NucleosomeRatio.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+
+```
+
+
+## Marker gene visualization:
+
+```{r eval=FALSE}
+
+# imputation weights using MAGIC
+proj <- addImputeWeights(proj)
+
+canonical_markers <- list(
+  'Astrocyte' = c('GFAP', 'AQP4', 'SLC1A2'),
+  'Pan-neuronal' = c('SNAP25', 'SYT1'),
+  'Excitatory_Neuron' = c('SLC17A7', 'SATB2'),
+  'Inhibitory_Neuron' = c('GAD1', 'GAD2'),
+  'Microglia' = c('CSF1R', 'CD74', 'P2RY12'),
+  'Oligodendrocyte' = c('MOBP', 'MBP', 'MOG'),
+  'Olig_Progenitor' = c('PDGFRA', 'CSPG4')
+)
+
+# with imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(proj),
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-W-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+# without imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = NULL,
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-without-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+
+```
+
+Make my own expression plot with
+
+```{r eval=FALSE}
+
+getAvailableMatrices(proj)
+
+gene_matrix <- getMatrixFromProject(proj, useMatrix='GeneScoreMatrix')
+gm <- assays(gene_matrix)$GeneScoreMatrix
+rownames(gm) <- gene_matrix@elementMetadata$name
+colnames(gm) <- rownames(proj@cellColData)
+
+
+# plot GFAP:
+
+df <- proj@cellColData %>% as.data.frame %>% select(c(UMAP1, UMAP2, Sample))
+df$expression <- gm['CSF1R',]
+
+p <- df %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log2(expression+1))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+  #geom_hex() + scale_fill_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_gfap.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+
+```
+
+Process one sample only just as a test:
+
+```{r eval=FALSE}
+
+
+proj_test <- proj[which(proj$Sample == 'Sample_10' & proj$TSSEnrichment > 10)]
+
+
+
+
+# LSI
+proj_test <- addIterativeLSI(proj_test, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+# batch correction with Harmony:
+# proj_test <- addHarmony(
+#   proj_test, reducedDims = "IterativeLSI",
+#   name = 'Harmony', groupBy='Sample'
+# )
+
+# Seurat clustering:
+proj_test <- addClusters(input = proj_test, reducedDims = "IterativeLSI", force=TRUE)
+
+# UMAP:
+proj_test <- addUMAP(ArchRProj = proj_test, reducedDims = "IterativeLSI", force=TRUE, minDist=0.1)
+
+
+# plot UMAP by cluster and sample
+p1 <- plotEmbedding(ArchRProj = proj_test, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+plotPDF(p1, name = "Sample10-UMAP-Sample-Clusters.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+
+
+# imputation weights using MAGIC
+proj_test <- addImputeWeights(proj_test, force=TRUE)
+
+# with imputation
+p <- plotEmbedding(
+    proj_test,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(proj_test),
+    pal=viridis(256)
+)
+
+plotPDF(plotList = p,
+    name = "Sample10-UMAP-Marker-Genes-W-Imputation.pdf",
+    ArchRProj = proj_test,
+    addDOC = FALSE, width = 5, height = 5)
+
+
+
+```

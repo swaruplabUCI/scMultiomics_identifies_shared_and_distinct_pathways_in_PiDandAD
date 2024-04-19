@@ -1,0 +1,235 @@
+---
+title:
+author: Samuel Morabito
+date: "`r Sys.time()`"
+output:
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+    toc_depth: 3
+---
+
+# Exploratory Data Analysis (EDA) of PiD pilot data using ArchR
+
+```{r eval=FALSE}
+
+library(ArchR)
+library(tidyverse)
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/pilot/EDA/')
+
+# set archR genome
+addArchRGenome("hg38")
+addArchRThreads(threads = 16)
+
+# reload project:
+proj <- loadArchRProject(path = "eda_archr")
+
+
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+
+```
+
+## Create arrow files:
+
+```{r eval=FALSE}
+
+cellranger_dir <-  "~/swaruplab/smorabit/data/PiD_2021/cellranger-count/"
+sample_names <- dir(cellranger_dir)[grepl('Sample', dir(cellranger_dir))]
+sample_files <- paste0(cellranger_dir, sample_names, '/outs/fragments.tsv.gz')
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = sample_files,
+  sampleNames = sample_names,
+  minTSS = 4, #Dont set this too high because you can always increase later
+  minFrags = 1000,
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+
+## Compute Doublet Scores:
+doubScores <- addDoubletScores(
+  input = ArrowFiles,
+  k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+  knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search.
+  LSIMethod = 1
+)
+
+## create archr project:
+
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "eda_archr",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+proj <- filterDoublets(ArchRProj = proj)
+
+# add diagnosis status based on Sample ID:
+proj@cellColData$Diagnosis <- factor(ifelse(proj@cellColData$Sample %in% c('Sample1', 'Sample3'), 'PiD', 'Control'), levels=c('PiD', 'Control'))
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+
+```
+
+## Primary Data processing
+
+```{r eval=FALSE}
+
+# LSI
+proj <- addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI")
+
+# batch correction with Harmony:
+proj <- addHarmony(
+  proj, reducedDims = "IterativeLSI",
+  name = 'Harmony', groupBy='Sample'
+)
+
+# Seurat clustering:
+proj <- addClusters(input = proj, reducedDims = "Harmony", force=TRUE)
+
+# UMAP:
+proj <- addUMAP(ArchRProj = proj, reducedDims = "Harmony", force=TRUE)
+
+
+# plot UMAP by cluster and sample
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+p3 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Diagnosis", embedding = "UMAP")
+plotPDF(p1,p2,p3, name = "Plot-UMAP-Sample-Clusters.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+```
+
+## Marker gene visualization:
+
+```{r eval=FALSE}
+
+# imputation weights using MAGIC
+proj <- addImputeWeights(proj)
+
+canonical_markers <- list(
+  'Astrocyte' = c('GFAP', 'AQP4', 'SLC1A2'),
+  'Pan-neuronal' = c('SNAP25', 'SYT1'),
+  'Excitatory_Neuron' = c('SLC17A7', 'SATB2'),
+  'Inhibitory_Neuron' = c('GAD1', 'GAD2'),
+  'Microglia' = c('CSF1R', 'CD74', 'P2RY12'),
+  'Oligodendrocyte' = c('MOBP', 'MBP', 'MOG'),
+  'Olig_Progenitor' = c('PDGFRA', 'CSPG4')
+)
+
+# with imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(proj),
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-W-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+# without imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = NULL,
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-without-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+
+```
+
+## Celltype annotation based on marker gene expression
+```{r eval=FALSE}
+
+anno_df <- data.frame(
+  cluster_num = paste0('C', 1:16),
+  celltype = c('MG', 'ODC', 'ODC', 'ODC', 'ODC', 'ASC', 'ASC', 'Unknown', 'INH', 'INH', 'Unknown', 'EX', 'EX', 'EX', 'OPC', 'ODC'),
+  cluster_ID = c('MG1', 'ODC1', 'ODC2', 'ODC3', 'ODC4', 'ASC1', 'ASC2', 'Unknown1', 'INH1', 'INH2', 'Unknown2', 'EX1', 'EX2', 'EX3', 'OPC1', 'ODC5'),
+  stringsAsFactors=FALSE
+)
+rownames(anno_df) <- anno_df$cluster_num
+
+# transfer cell type identities
+proj@cellColData$celltype <- anno_df[proj@cellColData$Clusters, 'celltype']
+proj@cellColData$cluster_ID <- anno_df[proj@cellColData$Clusters, 'cluster_ID']
+
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "celltype", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "cluster_ID", embedding = "UMAP")
+plotPDF(p1,p2, name = "Plot-UMAP-celltypes.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+pdf('eda_archr/Plots/snATAC_celltypes_barplot.pdf', width=6, height=3)
+df <- as.data.frame(rev(table(proj@cellColData$celltype)))
+colnames(df) <- c('celltype', 'n_cells')
+p <- ggplot(df, aes(y=n_cells, x=reorder(celltype, -n_cells), fill=celltype)) +
+  geom_bar(stat='identity') +
+  #scale_fill_manual(values=color_scheme_snATAC_clusters_flat[1:35]) +
+  scale_y_continuous(expand = c(0,0)) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    legend.title = element_blank(),
+  ) + NoLegend()
+print(p)
+dev.off()
+
+
+
+```
+
+
+```{r eval=FALSE}
+
+library(Seurat)
+
+rna_folder <- 'cellranger_aggr/premrna/AD_NucSeq_2019_no_101/outs/filtered_feature_bc_matrix/'
+
+data = Read10X(rna_folder)
+dim(data)
+seurat_obj <- CreateSeuratObject(counts = data)
+# dim(seurat_obj)
+
+# for snATAC, need to load each raw matrix separately and add together the cell counts
+# actually, just load the metadata tables and count the rows
+
+atac = 'cellranger_aggr/atac4/AD_NucSeq_2019/outs/filtered_peak_bc_matrix/'
+
+atac_barcodes <- read.table(paste0(atac, 'barcodes.tsv'), sep='\t')
+
+```

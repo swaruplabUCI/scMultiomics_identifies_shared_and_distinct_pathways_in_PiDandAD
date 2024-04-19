@@ -1,0 +1,419 @@
+
+```{r eval=FALSE}
+
+# conda activate voyager
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(ggpubr)
+library(ggrastr)
+library(patchwork)
+library(MetBrewer)
+theme_set(theme_cowplot())
+
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+
+# set random seed for reproducibility
+set.seed(12345)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/')
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+
+# load seurat object
+seurat_obj <- readRDS(file=paste0(data_dir, 'PiD_snRNA_seurat.rds'))
+
+```
+
+UMAP plots colored by cluster & cell type 
+
+```{r eval=FALSE}
+
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=FALSE,
+  raster=TRUE,
+  raster_dpi = 300,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+#  color_df = color_df
+) + ggtitle('')
+
+pdf(paste0(fig_dir, 'PiD_umap.pdf'), width=8, height=7)
+p
+dev.off()
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+  #color_df = color_df,
+) + ggtitle('')
+
+pdf(paste0(fig_dir, 'PiD_umap_labeled.pdf'), width=6, height=5)
+p
+dev.off()
+
+
+```
+
+
+QC Violin plots
+
+```{r eval=FALSE}
+
+
+################################################################################
+# Cluster level violin plots:
+################################################################################
+ 
+Idents(seurat_obj) <- seurat_obj$annotation
+p <- VlnPlot(seurat_obj, features = 'total_counts', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+  #scale_fill_manual(values=cell_group_colors) +
+  scale_y_continuous(labels=scales::comma) +
+  ylab(expression(italic(N)[UMI])) +
+  xlab('') + NoLegend() + ggtitle('')
+
+pdf(paste0(fig_dir, 'vln_nUMI_clusters.pdf'), height=4, width=10)
+p
+dev.off()
+
+
+p <- VlnPlot(seurat_obj, features = 'pct_counts_mt', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+ # scale_fill_manual(values=cell_group_colors) +
+  scale_y_continuous(labels=scales::comma) +
+  ylab("pct_counts_mt") +
+  xlab('') + NoLegend() + ggtitle('')
+
+pdf(paste0(fig_dir, 'vln_mito_clusters.pdf'), height=4, width=10)
+p
+dev.off()
+
+p <- VlnPlot(seurat_obj, features = 'n_genes_by_counts', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+#  scale_fill_manual(values=cell_group_colors) +
+  scale_y_continuous(labels=scales::comma) +
+  ylab(expression(italic(N)[Genes])) +
+  xlab('') + NoLegend() + ggtitle('')
+
+pdf(paste0(fig_dir, 'vln_nGenes_clusters.pdf'), height=4, width=10)
+p
+dev.off()
+
+
+################################################################################
+# SampleID level violin plots:
+################################################################################
+
+Idents(seurat_obj) <- seurat_obj$SampleID
+p <- VlnPlot(seurat_obj, features = 'total_counts', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+  scale_y_continuous(labels=scales::comma) +
+ # scale_fill_manual(values=SampleID_colors) +
+  ylab(expression(italic(N)[UMI])) +
+  xlab('') + NoLegend() + ggtitle('')
+
+pdf(paste0(fig_dir, 'vln_nUMI_SampleIDs.pdf'), height=4, width=10)
+p
+dev.off()
+
+
+p <- VlnPlot(seurat_obj, features = 'pct_counts_mt', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+  scale_y_continuous(labels=scales::comma) +
+ # scale_fill_manual(values=SampleID_colors) +
+  ylab("pct_counts_mt") +
+  xlab('') + NoLegend() + ggtitle('')
+
+pdf(paste0(fig_dir, 'vln_mito_SampleIDs.pdf'), height=4, width=10)
+p
+dev.off()
+
+p <- VlnPlot(seurat_obj, features = 'n_genes_by_counts', pt.size=0) +
+  geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+  scale_y_continuous(labels=scales::comma) +
+ #scale_fill_manual(values=SampleID_colors) +
+  ylab(expression(italic(N)[Genes])) +
+  xlab('') + NoLegend() + ggtitle('') 
+
+pdf(paste0(fig_dir, 'vln_nGenes_SampleIDs.pdf'), height=4, width=10)
+p
+dev.off()
+
+```
+
+
+Cluster proportion bar plots
+
+* Sample
+* Batch
+* Condition
+
+```{r eval=FALSE}
+
+################################################################################
+# snRNA-seq Proportion of Condition
+################################################################################
+
+seurat_meta <- seurat_obj@meta.data
+batches <- seurat_meta$SampleID %>% unique %>% as.character
+cur_clusters  <- seurat_meta$annotation %>% unique %>% as.character
+
+scale_vec <- table(seurat_meta$SampleID)
+
+proportion_df <- data.frame()
+for(i in 1:length(cur_clusters)){
+  cluster_meta <- subset(seurat_meta, annotation == cur_clusters[i])
+  cur_df <- as.data.frame(table(cluster_meta$SampleID)) %>% dplyr::rename(Count = Freq)
+
+  # compute the non-normalized % of cells in each group
+  cur_df$Freq <- cur_df$Count / sum(cur_df$Count)
+
+  # scale frequency to the total number of clusters in each sample
+  cur_df$Scaled <- cur_df$Count / scale_vec
+  cur_df$Scaled <- cur_df$Scaled / sum(cur_df$Scaled)
+
+  # add to ongoing proportion df
+  cur_df$cluster <- cur_clusters[i]
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, Sample = Var1)
+proportion_df$cluster <- factor(proportion_df$cluster, levels=levels(seurat_meta$annotation))
+
+p <- ggplot(proportion_df, aes(y=Scaled, x=cluster, fill=Sample)) +
+  geom_bar(stat='identity') +
+ # geom_hline(yintercept = 0.5, linetype='dashed') +
+  scale_y_continuous(expand = c(0,0)) +
+ # scale_fill_manual(values=sample_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_line(colour = "black"),
+    axis.line.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'cluster_proportion_sample_scaled.pdf'), height=4, width=10)
+print(p)
+dev.off()
+
+################################################################################
+# snRNA-seq Proportion of Condition
+################################################################################
+
+seurat_meta <- seurat_obj@meta.data
+batches <- seurat_meta$DX %>% unique %>% as.character
+cur_clusters  <- seurat_meta$annotation %>% unique %>% as.character
+
+scale_vec <- table(seurat_meta$DX)
+
+proportion_df <- data.frame()
+for(i in 1:length(cur_clusters)){
+  cluster_meta <- subset(seurat_meta, annotation == cur_clusters[i])
+  cur_df <- as.data.frame(table(cluster_meta$DX)) %>% dplyr::rename(Count = Freq)
+
+  # compute the non-normalized % of cells in each DX
+  cur_df$Freq <- cur_df$Count / sum(cur_df$Count)
+
+  # scale frequency to the total number of clusters in each sample
+  cur_df$Scaled <- cur_df$Count / scale_vec
+  cur_df$Scaled <- cur_df$Scaled / sum(cur_df$Scaled)
+
+  # add to ongoing proportion df
+  cur_df$cluster <- cur_clusters[i]
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, DX = Var1)
+proportion_df$cluster <- factor(proportion_df$cluster, levels=levels(seurat_meta$annotation))
+
+p <- ggplot(proportion_df, aes(y=Scaled, x=cluster, fill=DX)) +
+  geom_bar(stat='identity') +
+  geom_hline(yintercept = 0.5, linetype='dashed') +
+  scale_y_continuous(expand = c(0,0)) +
+ #scale_fill_manual(values=group_cp) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_line(colour = "black"),
+    axis.line.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'cluster_proportion_condition_scaled.pdf'), height=4, width=10)
+print(p)
+dev.off()
+
+##############################################################################
+# proportion of cluster in each sample
+##############################################################################
+
+seurat_meta <- seurat_obj@meta.data
+batches <- seurat_meta$annotation %>% unique %>% as.character
+cur_clusters  <- seurat_meta$Sample %>% unique %>% as.character
+
+proportion_df <- data.frame()
+for(i in 1:length(cur_clusters)){
+  cluster_meta <- subset(seurat_meta, Sample == cur_clusters[i])
+  cur_df <- as.data.frame(table(cluster_meta$annotation)) %>% dplyr::rename(Count = Freq)
+
+  # compute the non-normalized % of cells in each group
+  cur_df$Freq <- cur_df$Count / sum(cur_df$Count)
+
+  # add to ongoing proportion df
+  cur_df$cluster <- cur_clusters[i]
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, Group = Var1)
+proportion_df$cluster <- factor(proportion_df$cluster, levels=levels(seurat_meta$Sample))
+
+p <- ggplot(proportion_df, aes(y=Freq, x=cluster, fill=Group)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=cell_group_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_line(colour = "black"),
+    axis.line.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'sample_proportion_clusters.pdf'), height=4, width=10)
+print(p)
+dev.off()
+
+
+```
+
+Marker gene heatmap using markers from Miyoshi & Morabito 2023
+
+```{r eval=FALSE}
+
+seurat_adds <- readRDS(file="/dfs7/swaruplab/smorabit/analysis/ADDS_2021/splitseq/integration/data/ADDS_AD_integrated.rds" )
+
+
+group_levels <- c(
+  'EX L2', 'EX L2-3', 'EX L3-5', 'EX L5', 'EX L5-6', 'EX L6',
+  'INH VIP+', 'INH', 'INH LAMP5+', 'INH PVALB+', 'INH SST+',
+  'ASC1', 'ASC2', 'ASC3', 'ASC4',
+  'MG1', 'MG2',
+  'ODC1', 'ODC2', 'ODC3',
+  'OPC1', 'OPC2', 'OPC3',
+  'END Arterial', 'END Capillary',
+  'T-Pericyte', 'M-Pericyte', 'SMC',
+  'Perivascular Fibroblast', 'Meningeal Fibroblast'
+)
+
+seurat_adds$cell_identity <- factor(
+  as.character(seurat_adds$cell_identity),
+  levels = group_levels
+)
+
+
+# read combined
+degs <- read.csv(paste0('/dfs7/swaruplab/smorabit/analysis/ADDS_2021/splitseq/integration/DEGs/combined/cluster_markers.csv'))
+group_levels <- levels(seurat_adds$cell_identity)
+degs$group <- factor(as.character(degs$group), levels=group_levels)
+
+
+n_degs <- 5
+plot_genes <- degs %>%
+  arrange(group) %>%
+  subset(p_val_adj <= 0.05) %>%
+  group_by(group) %>%
+  top_n(n_degs, wt=avg_log2FC)  %>%
+  .$gene
+
+
+# set random seed
+set.seed(42)
+
+temp <- table(seurat_obj@meta.data$annotation)
+
+df <- data.frame()
+for(i in 1:length(temp)){
+
+  if(temp[[i]] < 500){
+    cur_df <- seurat_obj@meta.data %>% subset(annotation == names(temp)[i])
+  } else{
+    cur_df <- seurat_obj@meta.data %>% subset(annotation == names(temp)[i]) %>% sample_n(500)
+  }
+  df <- rbind(df, cur_df)
+}
+
+
+seurat_obj <- ScaleData(seurat_obj, features = unique(plot_genes), verbose=FALSE)
+
+p <- DoHeatmap(
+  seurat_obj %>% subset(barcode %in% df$barcode),
+  features=unlist(plot_genes),
+  group.by='annotation',
+ # group.colors = color_df$colour,
+  raster=TRUE, slot='scale.data'
+) + theme(
+  axis.text.y = element_text(face='italic', size=3)
+)
+
+pdf(paste0(fig_dir, 'cluster_marker_gene_heatmap.pdf'), width=12, height=8, useDingbats=FALSE)
+p
+dev.off()
+
+```
+
+UBE3A 
+
+```{r eval=FALSE}
+
+library(ggpubr)
+library(patchwork)
+theme_set(theme_cowplot())
+
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+p <- VlnPlot(
+    seurat_obj,
+    features = 'UBE3A',
+    group.by = 'cell_type',
+    split.by = 'DX', 
+    pt.size=0
+)  + xlab('')
+
+pdf(paste0(fig_dir, 'vln_UBE3A.pdf'), width=12, height=3, useDingbats=FALSE)
+p
+dev.off()
+
+p <- VlnPlot(
+    seurat_adds,
+    features = 'UBE3A',
+    group.by = 'cell_type',
+    split.by = 'Diagnosis', 
+    pt.size=0
+)  + xlab('')
+
+pdf(paste0(fig_dir, 'vln_UBE3A_adds.pdf'), width=12, height=3, useDingbats=FALSE)
+p
+dev.off()
+
+```

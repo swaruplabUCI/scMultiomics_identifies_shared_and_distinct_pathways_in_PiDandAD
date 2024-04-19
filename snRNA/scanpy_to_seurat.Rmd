@@ -1,0 +1,72 @@
+```{r eval=FALSE}
+
+# conda activate hdWGCNA
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/')
+fig_dir <- 'figures/'
+data_dir <- '/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/data/'
+
+
+# load the counts matrix for the integrated dataset
+X <- Matrix::readMM(paste0(data_dir,'/PiD_snRNA_processed_counts.mtx'))
+
+# load the obs table and the var table
+cur_obs <- read.csv(paste0(data_dir, '/PiD_snRNA_processed_obs.csv'))
+rownames(cur_obs) <- cur_obs$barcode
+cur_var <- read.csv(paste0(data_dir, '/PiD_snRNA_processed_var.csv'))
+
+# load the harmony
+harmony <- read.table(paste0(data_dir, 'PiD_snRNA_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+
+# get the umap from cell_meta:
+umap <- cur_obs[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cur_obs)
+rownames(X) <- cur_var$gene_symbol
+rownames(harmony) <- rownames(cur_obs)
+rownames(umap) <- rownames(cur_obs)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cur_obs,
+  assay = "RNA",
+  project = "PiD",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(harmony),
+  key="harmony",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# make a umap plot as a test
+p <- DimPlot(seurat_obj, group.by = 'cell_type', split.by = 'sample_organism', raster=FALSE, ncol=3)
+pdf(paste0(fig_dir, 'integrated_umap.pdf'), width=15, height=10)
+p
+dev.off()
+
+# compute normalized expression 
+seurat_obj <- NormalizeData(seurat_obj)
+
+# save the seurat object
+saveRDS(seurat_obj, file=paste0(data_dir, 'PiD_snRNA_seurat.rds'))
+
+
+```

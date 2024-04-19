@@ -1,0 +1,759 @@
+```{r eval=FALSE}
+
+# conda activate voyager
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(ggpubr)
+library(ggrastr)
+library(patchwork)
+library(MetBrewer)
+theme_set(theme_cowplot())
+
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+# set random seed for reproducibility
+set.seed(12345)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/')
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+
+# load seurat object
+seurat_obj <- readRDS(file=paste0(data_dir, 'PiD_snRNA_seurat.rds'))
+seurat_ad <- readRDS("/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Swarup_2021.rds")
+
+```
+
+Combine the DEGs into one table :
+
+```{r eval=FALSE}
+
+##############################################################
+# celltype DX
+##############################################################
+
+DEG_dir <- "/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/celltype_DX/"
+DEG_tests <- dir(DEG_dir)
+
+combined <- Reduce(rbind, lapply(DEG_tests, function(file){
+  read.csv(paste0(DEG_dir, '/', file))
+}))
+
+# order them by logFC
+combined %<>% dplyr::group_by(group) %>% 
+    arrange(desc(avg_log2FC))
+head(combined)
+
+write.csv(
+  combined,
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+write.csv(
+  combined %>% subset(p_val_adj <= 0.05),
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA_signif.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+
+##############################################################
+# celltype DX AD
+##############################################################
+
+DEG_dir <- "/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/celltype_DX_AD/"
+DEG_tests <- dir(DEG_dir)
+
+combined <- Reduce(rbind, lapply(DEG_tests, function(file){
+  read.csv(paste0(DEG_dir, '/', file))
+}))
+
+# order them by logFC
+combined %<>% dplyr::group_by(group) %>% 
+    arrange(desc(avg_log2FC))
+head(combined)
+
+write.csv(
+  combined,
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/AD_vs_Control_celltype_snRNA.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+write.csv(
+  combined %>% subset(p_val_adj <= 0.05),
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/AD_vs_Control_celltype_snRNA_signif.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+##############################################################
+# celltype markers
+##############################################################
+
+DEG_dir <- "/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/celltype_markers/"
+DEG_tests <- dir(DEG_dir)
+
+combined <- Reduce(rbind, lapply(DEG_tests, function(file){
+  read.csv(paste0(DEG_dir, '/', file))
+}))
+
+# order them by logFC
+combined %<>% dplyr::group_by(group) %>% 
+    arrange(desc(avg_log2FC))
+head(combined)
+
+write.csv(
+  combined,
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_celltype_markers_snRNA.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+##############################################################
+# cluster markers
+##############################################################
+
+DEG_dir <- "/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/cluster_markers/"
+DEG_tests <- dir(DEG_dir)
+
+combined <- Reduce(rbind, lapply(DEG_tests, function(file){
+  read.csv(paste0(DEG_dir, '/', file))
+}))
+
+# order them by logFC
+combined %<>% dplyr::group_by(group) %>% 
+    arrange(desc(avg_log2FC))
+head(combined)
+
+write.csv(
+  combined,
+  file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_cluster_markers_snRNA.csv',
+  quote=FALSE, row.names=FALSE
+)
+
+
+```
+
+
+Marker gene heatmap
+
+```{r eval=FALSE}
+
+
+degs <- read.csv(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_cluster_markers_snRNA.csv')
+degs$group <- factor(
+  degs$group,
+  levels = levels(seurat_obj$annotation)
+)
+
+# don't include ENS genes:
+degs <- degs[!grepl('ENSG', degs$gene),]
+
+n_degs <- 5
+plot_genes <- degs %>%
+  arrange(group) %>%
+  subset(p_val_adj <= 0.05) %>%
+  group_by(group) %>%
+  top_n(n_degs, wt=avg_log2FC)  %>%
+  .$gene
+
+seurat_obj <- ScaleData(seurat_obj, features=plot_genes)
+
+# set random seed
+set.seed(42)
+
+temp <- table(seurat_obj@meta.data$annotation)
+
+df <- data.frame()
+for(i in 1:length(temp)){
+
+  if(temp[[i]] < 500){
+    cur_df <- seurat_obj@meta.data %>% subset(annotation == names(temp)[i])
+  } else{
+    cur_df <- seurat_obj@meta.data %>% subset(annotation == names(temp)[i]) %>% sample_n(500)
+  }
+  df <- rbind(df, cur_df)
+}
+
+#seurat_obj$ordered_clusters <- fct_rev(seurat_obj$annotation)
+p <- DoHeatmap(
+  seurat_obj %>% subset(barcode %in% df$barcode),
+  features=unlist(plot_genes),
+  group.by='annotation',
+  raster=TRUE, slot='scale.data'
+  #group.colors=cluster_colors
+) +
+theme(axis.text.y = element_text(face='italic', size=5)) + 
+scale_fill_continuous(low='grey95', high='darkorchid4')
+
+pdf(paste0(fig_dir, 'marker_gene_heatmap.pdf'), width=12, height=8, useDingbats=FALSE)
+p
+dev.off()
+
+```
+
+Volcano Plots for DEGs:
+
+```{r eval=FALSE}
+
+name <- 'PiD_vs_Control_celltype'
+name <- 'AD_vs_Control_celltype'
+
+
+# load celltype degs:
+degs <- read.csv(file=paste0('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/', name,'_snRNA.csv'))
+degs$group <- factor(
+  degs$group,
+  levels = levels(seurat_obj$cell_type)
+)
+
+degs <- degs[!grepl('MT-', degs$gene),]
+
+# lowest non-zero value
+lowest <- degs %>% subset(p_val_adj != 0) %>% top_n(-1, wt=p_val_adj) %>% .$p_val_adj
+degs$p_val_adj <- ifelse(degs$p_val_adj == 0, lowest, degs$p_val_adj)
+
+nlabel <- 5
+color1 <- '#A572E8'; color2 <- '#55BCC2'
+
+# extra genes to label:
+label_genes <- c('UBE3A')
+
+# label the top and bottom significant genes by log fold change
+cur_degs <- Reduce(rbind, lapply(unique(degs$group), function(x){
+  cur <- subset(degs, group == x)
+
+  top_thresh <- cur %>% subset(p_val_adj <= 0.05 & avg_log2FC > 0) %>% top_n(nlabel, wt=avg_log2FC) %>% .$avg_log2FC %>% min
+  bottom_thresh <- cur %>% subset(p_val_adj <= 0.05 & avg_log2FC < 0) %>% top_n(-1*nlabel, wt=avg_log2FC) %>% .$avg_log2FC %>% max
+
+  cur$anno <- ifelse(cur$gene %in% label_genes, cur$gene, NA )
+  cur$anno <- ifelse(cur$p_val_adj <= 0.05 & cur$avg_log2FC >= top_thresh, cur$gene, cur$anno)
+  cur$anno <- ifelse(cur$p_val_adj <= 0.05 & cur$avg_log2FC <= bottom_thresh, cur$gene, cur$anno)
+  cur$color <- ifelse(cur$p_val_adj > 0.05, 'gray', ifelse(cur$avg_log2FC > 0, color1, color2))
+  cur
+}))
+
+groups <- levels(degs$group)
+plot_list <- list()
+for(cluster  in groups){
+
+  print(cluster)
+  plot_degs <- cur_degs %>% subset(group == cluster)
+
+  p <- plot_degs  %>%
+     ggplot(aes(x=avg_log2FC, y=-log10(p_val_adj))) +
+     geom_hline(yintercept=-log10(0.05), linetype='dashed')
+
+  # plot genes that are Nr4a2 targets
+  p <- p + ggrastr::rasterise(geom_point(
+    alpha=0.5,
+    color=plot_degs %>% .$color
+  ), dpi=500)
+
+  p <- p +
+     geom_point(
+       inherit.aes=FALSE,
+       data=subset(plot_degs, !is.na(anno)),
+       aes(avg_log2FC, -log10(p_val_adj)),
+       fill=subset(plot_degs, !is.na(anno)) %>% .$color,
+       shape=21, size=3, color='black'
+     ) +
+     geom_text_repel(aes(label=anno), color='black', fontface='italic',  min.segment.length=0) +
+     xlim(-1*max(abs(plot_degs$avg_log2FC))-0.1, max(abs(plot_degs$avg_log2FC))+0.1) +
+     ggtitle(paste0(cluster)) +
+     xlab(bquote("Average log"[2]~"(Fold Change)")) +
+     ylab(bquote("-log"[10]~"(Adj. P-value)")) +
+     theme(
+       panel.border = element_rect(color='black', fill=NA, size=1),
+       panel.grid.major = element_blank(),
+       axis.line = element_blank(),
+       plot.title = element_text(hjust = 0.5),
+       legend.position='bottom'
+     )
+
+    plot_list[[cluster]] <- p
+
+}
+
+out <- paste0(fig_dir, 'volcano_', name, '.pdf')
+
+# celltype
+pdf(out, width=14, height=7, useDingbats=FALSE)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+```
+
+Bar plot showing the number of DEGs up / down 
+
+```{r eval=FALSE}
+
+# load celltype degs:
+degs <- read.csv(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA.csv')
+degs$group <- factor(
+  degs$group,
+  levels = levels(seurat_obj$cell_type)
+)
+
+
+logfc_thresh <- 0.25
+
+
+# just plot the number of DEGs:
+deg_counts <- subset(degs, avg_log2FC >= logfc_thresh & p_val_adj <= 0.05) %>% .$group %>% table
+deg_counts <- data.frame(
+  group = names(deg_counts),
+  count = as.numeric(deg_counts)
+)
+deg_counts$direction <- 'up'
+
+deg_counts_down <- subset(degs, avg_log2FC <= -logfc_thresh & p_val_adj <= 0.05) %>% .$group %>% table
+deg_counts_down <- data.frame(
+  group = names(deg_counts_down),
+  count = -as.numeric(deg_counts_down)
+)
+deg_counts_down$direction <- 'down'
+deg_counts <- rbind(deg_counts, deg_counts_down)
+
+deg_counts$group <- factor(as.character(deg_counts$group), levels=levels(seurat_obj$cell_type))
+
+deg_counts$label <- ifelse(
+    abs(deg_counts$count) > 25, abs(deg_counts$count), NA
+)
+
+p1 <- ggplot(deg_counts, aes(x=group, y=count, fill=group)) + 
+  geom_bar(stat='identity') +
+  geom_hline(yintercept=0) + 
+  geom_text(aes(label=label), vjust=0.5) +
+  #scale_fill_manual(values=human_cp) + 
+  NoLegend() + 
+  RotatedAxis() +
+  theme(
+   # axis.line.x = element_blank(),
+   # axis.text.x = element_blank(),
+   # axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.margin = margin(c(0,0,0,0))
+  )
+
+pdf(paste0(fig_dir, 'DEG_counts_barplot.pdf'), width=5, height=3, useDingbats=FALSE)
+p1
+dev.off()
+
+
+```
+
+
+Run EnrichR for different sets of genes for each group
+
+```{r eval=FALSE}
+
+library(enrichR)
+
+dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021', 'WikiPathway_2021_Human', 'KEGG_2021_Human')
+
+# load celltype degs:
+degs <- read.csv(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA.csv')
+degs$group <- factor(
+  degs$group,
+  levels = levels(seurat_obj$cell_type)
+)
+
+groups <- levels(degs$group)
+combined_output <- data.frame()
+logfc_thresh <- 0.25
+
+# run loop over each group
+for(cur_group in groups){
+  print(cur_group)
+
+  cur_degs_up <- subset(degs, group == cur_group & p_val_adj <= 0.05 & avg_log2FC >= logfc_thresh) %>% .$gene
+  cur_degs_down <- subset(degs, group == cur_group & p_val_adj <= 0.05 & avg_log2FC <= -logfc_thresh) %>% .$gene
+
+  # list of inputs to enrichr
+  input_list <- list(
+    up = cur_degs_up,
+    down = cur_degs_down
+  )
+
+  # size of lists
+  lapply(input_list, function(x){
+    print(length(x))
+  })
+
+  # run enrichr and combine outputs
+  enriched_df <- do.call(rbind, lapply(names(input_list), function(x){
+    if(length(input_list[[x]]) > 0){
+      cur_enrich <- enrichr(input_list[[x]], dbs)
+    } else{return(data.frame())}
+    cur_df <- do.call(rbind, lapply(dbs, function(cur_db){
+      df <- cur_enrich[[cur_db]]
+      if(nrow(df) > 1){df$degs <- x; df$group <- cur_group; df$db <- cur_db}
+      else{df <- data.frame()}
+      df
+    }))
+  }))
+
+  combined_output <- rbind(combined_output, enriched_df)
+
+}
+
+combined_output$ngenes <- unlist(lapply(strsplit(combined_output$Genes, ';'), function(x){length(x)}))
+
+
+# write the output to a tsv
+write.table(combined_output, file=paste0(data_dir, 'PiD_vs_Control_GO_terms.tsv'), quote=FALSE, row.names=FALSE, sep='\t')
+
+
+
+combined_output %>%
+  subset(P.value < 0.05 & ngenes > 2) %>%
+  write.table(
+    file=paste0(data_dir, 'PiD_vs_Control_GO_terms_signif.tsv'),
+    quote=FALSE, row.names=FALSE, sep='\t'
+  )
+
+combined_output <- read.delim(paste0(data_dir, 'PiD_vs_Control_GO_terms_signif.tsv'))
+
+
+#################################################
+# plot selected 
+#################################################
+
+
+
+
+selected_terms <- read.delim(paste0(data_dir, 'PiD_vs_Control_GO_terms_selected.txt'), sep='\t', header=1)
+selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
+
+
+p <- selected_terms  %>% subset(degs == 'up') %>%
+  ggplot(aes(x=log(Combined.Score), y=reorder(Term, Combined.Score), fill=group))+
+  geom_bar(stat='identity', position='identity') +
+  geom_text(aes(label=Term), x=.1, color='black', size=3.5, hjust='left') +
+ # scale_fill_manual(values=group_colors) +
+  xlab('log(Enrichment)') +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, NA)) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.y=element_blank(),
+    axis.line.y=element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    axis.title.y = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'PiD_vs_Control_selected_GO_terms_up_bar.pdf'), width= 3, height=3 , useDingbats=FALSE)
+p + facet_wrap(~group, ncol=1, scales='free') + NoLegend()
+dev.off()
+
+p <- selected_terms  %>% subset(degs == 'down') %>%
+  ggplot(aes(x=-log(Combined.Score), y=reorder(Term, Combined.Score), fill=group))+
+  geom_bar(stat='identity', position='identity') +
+  geom_text(aes(label=Term), x=-.1, color='black', size=3.5, hjust='right') +
+ #scale_fill_manual(values=group_colors) +
+  xlab('log(Enrichment)') +
+  scale_x_continuous(expand = c(0, 0), limits = c(NA, 0)) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.y=element_blank(),
+    axis.line.y=element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    axis.title.y = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'PiD_vs_Control_selected_GO_terms_down_bar.pdf'), width= 3, height=3 , useDingbats=FALSE)
+p + facet_wrap(~group, ncol=1, scales='free') + NoLegend()
+dev.off()
+
+```
+
+UCell analysis for selected GO terms in Fig 6, Ze sent them on slack 
+
+```{r eval=FALSE}
+
+
+Down: Positive Regulation Of Protein Ubiquitination (GO:0031398), Regulation Of Extrinsic Apoptotic Signaling Pathway (GO:2001236)
+Up: Short-Chain Fatty Acid Catabolic Process (GO:0019626), Short-Chain Fatty Acid Metabolic Process (GO:0046459)
+
+
+```
+
+Check ADAM10 & TMEM106B
+
+```{r eval=FALSE}
+
+degs <- read.csv(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA.csv')
+degs$group <- factor(
+  degs$group,
+  levels = levels(seurat_obj$cell_type)
+)
+ 
+subset(degs, gene == 'ADAM10' & group == 'EX')
+subset(degs, gene == 'TMEM106B' & group == 'EX')
+subset(degs, gene == 'UBE3A' & group == 'EX')
+subset(degs, gene == 'UBE3C' & group == 'EX')
+
+```
+
+
+Get Target genes from TF network (from Ze)
+
+```{r eval=FALSE}
+
+library(hdWGCNA)
+
+
+# load celltype degs:
+degs_ad <- read.csv(file=paste0('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/AD_vs_Control_celltype_snRNA.csv'))
+degs_pid <- read.csv(file=paste0('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_vs_Control_celltype_snRNA.csv'))
+
+
+# load AD seurat object
+seurat_ad <- readRDS("/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Swarup_2021.rds")
+
+# select cell type
+cur_celltype <- 'EX'
+
+# load PiD TF data 
+load(paste0("/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/TF_Net/data/",cur_celltype, "/TF_Net_adj_df_", cur_celltype, "_PiD.rda"))
+adj_df_pid <- adj_df_wInfo
+
+# load AD TF data 
+load(paste0("/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/TF_Net/data/", cur_celltype, "/TF_Net_adj_df_", cur_celltype, "_AD.rda"))
+adj_df_ad <- adj_df_wInfo
+
+#-------------------------------------------------------------#
+# Get genes that are "expressed" in this cell type
+#-------------------------------------------------------------#
+
+cur_RNA_pid <- subset(seurat_obj, cell_type == cur_celltype & DX == 'Control')
+cur_RNA_ad <- subset(seurat_ad, cell_type == cur_celltype & Diagnosis == 'Control')
+
+# get expressed_genes at least 25%
+cur_RNA_pid <- SetupForWGCNA(
+  cur_RNA_pid,
+  gene_select = "fraction",
+  fraction = 0.25,
+  wgcna_name = cur_celltype
+)
+length(GetWGCNAGenes(cur_RNA_pid))
+
+# get expressed_genes at least 25%
+cur_RNA_ad <- SetupForWGCNA(
+  cur_RNA_ad,
+  gene_select = "fraction",
+  fraction = 0.25,
+  wgcna_name = cur_celltype
+)
+length(GetWGCNAGenes(cur_RNA_ad))
+
+genes_use <- intersect(GetWGCNAGenes(cur_RNA_pid), GetWGCNAGenes(cur_RNA_ad))
+genes_use <- union(GetWGCNAGenes(cur_RNA_pid), GetWGCNAGenes(cur_RNA_ad))
+length(genes_use)
+
+#-------------------------------------------------------------#
+# subset the TF tables by these genes 
+#-------------------------------------------------------------#
+
+adj_df_pid <- subset(adj_df_pid, target %in% genes_use)
+adj_df_ad <- subset(adj_df_ad, target %in% genes_use)
+
+
+#-------------------------------------------------------------#
+# Correlate the log2FC of the target genes between AD & PiD
+#-------------------------------------------------------------#
+
+# all TFs
+tf_list <- intersect(adj_df_pid$source, adj_df_ad$source)
+
+# subset by "expressed" genes?
+tf_list <- tf_list[tf_list %in% genes_use]
+
+cor_list <- c()
+cor_list_signif <- c()
+tf_names <- c()
+
+cor_df <- data.frame()
+
+coaccess_cutoff <- 0.25
+
+for(cur_tf in tf_list){
+  print(cur_tf)
+
+  cur_targets1 <- subset(adj_df_pid, source == cur_tf & coaccess > coaccess_cutoff)
+  cur_targets2 <- subset(adj_df_ad, source == cur_tf & coaccess > coaccess_cutoff)
+
+  cur_targets <- union(cur_targets1$target, cur_targets2$target)
+
+
+  cur_degs_ad <- subset(degs_ad, group == cur_celltype & gene %in% cur_targets)
+  cur_degs_pid <- subset(degs_pid, group == cur_celltype & gene %in% cur_targets)
+
+  # make sure they are in the same order:
+  rownames(cur_degs_ad) <- cur_degs_ad$gene
+  rownames(cur_degs_pid) <- cur_degs_pid$gene
+  cur_degs_pid <- cur_degs_pid[cur_degs_ad$gene,]
+
+  # join the two dataframes
+  plot_df <- dplyr::inner_join(cur_degs_ad, cur_degs_pid, by = 'gene')
+
+  signif_only <- TRUE
+  logfc_thresh <- 0.05
+
+  plot_df$group <- ifelse(plot_df$avg_log2FC.x >= logfc_thresh & plot_df$avg_log2FC.y >= logfc_thresh, "Consistent", "")
+  plot_df$group <- ifelse(plot_df$avg_log2FC.x <= -logfc_thresh & plot_df$avg_log2FC.y <= -logfc_thresh, "Consistent", plot_df$group)
+  plot_df$group <- ifelse(plot_df$avg_log2FC.x >= logfc_thresh & plot_df$avg_log2FC.y <= -logfc_thresh, "Inconsistent", plot_df$group)
+  plot_df$group <- ifelse(plot_df$avg_log2FC.x <= -logfc_thresh & plot_df$avg_log2FC.y >= logfc_thresh, "Inconsistent", plot_df$group)
+  group_colors <- c('grey', 'blue', 'yellow')
+
+    # how many overlapping?
+    up_right <- plot_df %>% subset(avg_log2FC.x >= logfc_thresh & avg_log2FC.y >= logfc_thresh & c(p_val_adj.x < 0.05 | p_val_adj.y < 0.05)) %>% nrow
+    down_right <- plot_df %>% subset(avg_log2FC.x >= logfc_thresh & avg_log2FC.y <= -logfc_thresh & c(p_val_adj.x < 0.05 | p_val_adj.y < 0.05)) %>% nrow
+    up_left <- plot_df %>% subset(avg_log2FC.x <= -logfc_thresh & avg_log2FC.y >= logfc_thresh & c(p_val_adj.x < 0.05 | p_val_adj.y < 0.05)) %>% nrow
+    down_left <- plot_df %>% subset(avg_log2FC.x <= -logfc_thresh & avg_log2FC.y <= -logfc_thresh & c(p_val_adj.x < 0.05 | p_val_adj.y < 0.05)) %>% nrow
+
+  annotations <- data.frame(
+          xpos = c(-Inf,-Inf,Inf,Inf),
+          ypos =  c(-Inf, Inf,-Inf,Inf),
+          annotateText = c(as.character(down_left),as.character(up_left), as.character(down_right),as.character(up_right)),
+          hjustvar = c(-1,-1,2,2),
+          vjustvar = c(-1,2,-1,2)) #<- adjust
+
+
+  if(signif_only){
+    plot_df <- subset(plot_df, p_val_adj.x < 0.05 | p_val_adj.y < 0.05)
+    if(nrow(plot_df) == 0){next}
+  }
+
+  cur_fcx_signif <- subset(plot_df, p_val_adj.x <= 0.05 & p_val_adj.y <= 0.05) %>% .$avg_log2FC.x
+  cur_fcy_signif <- subset(plot_df, p_val_adj.x <= 0.05 & p_val_adj.y <= 0.05) %>% .$avg_log2FC.y
+
+  print(length(cur_fcx_signif))
+
+  if(length(cur_fcx_signif) == 0){
+    next
+  }
+
+  cur_cor_signif <-  cor(
+      x=cur_fcx_signif, 
+      y=cur_fcy_signif
+    )
+  cur_cor <- cor(
+    as.numeric(plot_df$avg_log2FC.x),
+    as.numeric(plot_df$avg_log2FC.y)
+  )
+  cor_list_signif <- c(cor_list_signif, cur_cor_signif)
+  cor_list <- c(cor_list, cur_cor)
+  tf_names <- c(tf_names, cur_tf)
+
+  cur_df <- data.frame(
+    tf = cur_tf,
+    cor = cur_cor,
+    n_targets = nrow(plot_df),
+    cor_signif = cur_cor_signif,
+    n_targets_signif = length(cur_fcx_signif)
+  )
+
+  cor_df <- rbind(cor_df, cur_df)
+
+}
+
+
+#-------------------------------------------------------------#
+# Plot the correlations
+#-------------------------------------------------------------#
+
+
+cor_df %<>% dplyr::arrange(desc(cor)) %>% 
+  mutate(rank = factor(1:nrow(cor_df)))
+
+
+p <- cor_df %>%
+  ggplot(aes(y=rev(rank), x = cor, fill=cor)) + 
+  geom_bar(stat='identity', width=1) +
+  geom_vline(xintercept=0, color='black') + 
+  #geom_text(aes(label=tf), color='black', size=2.5, hjust='center') +
+  scale_fill_gradient2(high="orange2", mid='grey95', low='dodgerblue') +
+  NoLegend() + xlab('') + ylab('') +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+pdf(paste0(fig_dir, cur_celltype, '_target_ranks.pdf'), width=3, height=6)
+p
+dev.off()
+
+
+
+#-------------------------------------------------------------#
+# Plot the significant correlations
+#-------------------------------------------------------------#
+
+
+plot_df <- cor_df %>% subset() dplyr::arrange(desc(cor)) %>% 
+  mutate(rank = factor(1:nrow(cor_df)))
+
+
+p <- cor_df %>%
+  ggplot(aes(y=rev(rank), x = cor, fill=cor)) + 
+  geom_bar(stat='identity', width=1) +
+  geom_vline(xintercept=0, color='black') + 
+  #geom_text(aes(label=tf), color='black', size=2.5, hjust='center') +
+  scale_fill_gradient2(high="orange2", mid='grey95', low='dodgerblue') +
+  NoLegend() + xlab('') + ylab('') +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+pdf(paste0(fig_dir, cur_celltype, '_target_ranks.pdf'), width=3, height=6)
+p
+dev.off()
+
+
+names(cor_list) <- tf_names
+
+# plot_range <- max(max(plot_df$avg_log2FC.x), max(plot_df$avg_log2FC.y))
+# p <- plot_df %>%
+#   ggplot(aes(x = avg_log2FC.x, y = avg_log2FC.y, color=group)) +
+#   geom_hline(yintercept = 0, linetype='dashed', color='grey') +
+#   geom_vline(xintercept = 0, linetype='dashed', color='grey') +
+#   ggrastr::rasterise(geom_point(), dpi=500) +
+#   scale_color_manual(values=group_colors) +
+#   #geom_smooth(inherit.aes=FALSE, data=subset(plot_df, p_val_adj.x <= 0.05 & p_val_adj.y <= 0.05), mapping = aes(x = avg_log2FC.x, y = avg_log2FC.y), method='lm', color='black') +
+#   stat_cor(inherit.aes=FALSE, data=subset(plot_df, p_val_adj.x <= 0.05 & p_val_adj.y <= 0.05), mapping = aes(x = avg_log2FC.x, y = avg_log2FC.y), method='pearson') +
+#   xlim(c(-plot_range, plot_range)) +
+#   ylim(c(-plot_range, plot_range)) +
+#   theme(
+#     axis.line.x = element_blank(),
+#     axis.line.y = element_blank(),
+#     panel.border = element_rect(colour = "black", fill=NA, size=1),
+#     plot.title = element_text(hjust=0.5)
+#   ) +
+#   coord_fixed(ratio=1) + NoLegend() +
+#   xlab(bquote("AD Avg. log"[2]~"(FC)")) +
+#   ylab(bquote("PiD Avg. log"[2]~"(FC)")) +
+#   ggtitle(cur_tf) + 
+#   geom_text(inherit.aes=FALSE, data=annotations,aes(x=xpos,y=ypos,hjust=hjustvar,vjust=vjustvar,label=annotateText))
+
+
+
+# pdf(paste0(fig_dir, 'test', cur_tf, '_tf_target_compare.pdf'), width= 6, height=6 , useDingbats=FALSE)
+# p 
+# dev.off()
+
+```

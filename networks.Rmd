@@ -1,0 +1,1924 @@
+
+```{r eval=FALSE}
+
+# conda activate cicero
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(GenomicRanges)
+theme_set(theme_cowplot())
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/TF_net')
+
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# load the PiD + AD seurat_obj object
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated.rds')
+
+peaks <- read.csv('~/swaruplab/smorabit/analysis/PiD_2021/data/peak_table.csv')
+peaks <- GRanges(peaks)
+peaks$peak <- paste0(
+  as.character(seqnames(peaks)), '-',
+  as.character(start(peaks)), '-',
+  as.character(end(peaks))
+)
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank(),
+  plot.title = element_text(hjust = 0.5)
+)
+
+load('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/color_scheme.rda')
+load('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/color_scheme.rda')
+
+color_scheme_snATAC_celltype$EX <- 'turquoise'
+cp <- color_scheme_snATAC_celltype
+cp$Unknown <- NULL
+
+dx_cp <- c(
+  AD = "#E87D72",
+  PiD = "#a572e8",
+  Control = "#55BCC2"
+)
+
+
+ze_data_dir <- "/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/Analysis_n_Figures/data/"
+
+```
+
+fix the pid seurat object
+
+```{r eval=FALSE}
+
+# load the old PiD + AD seurat_obj object
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated_in_progress_11-01-21.rds')
+
+
+# fix some of the meta-data that was different between the two studies
+seurat_obj$Diagnosis <- ifelse(seurat_obj$Dataset == 'AD', seurat_obj$Diagnosis, seurat_obj$DX)
+seurat_obj$Diagnosis <- ifelse(seurat_obj$Diagnosis == "Pick's disease", 'PiD', seurat_obj$Diagnosis)
+
+# add the UMAP coordinates:
+seurat_obj$UMAP_1 <- seurat_obj@reductions$umap@cell.embeddings[,1]
+seurat_obj$UMAP_2 <- seurat_obj@reductions$umap@cell.embeddings[,2]
+
+seurat_obj$Sample <- ifelse(
+  seurat_obj$Dataset == 'AD',
+  paste0('AD_', as.character(seurat_obj$Sample.ID)),
+  paste0('PiD_', as.character(seurat_obj$SampleID))
+)
+
+
+###############################
+# update the fragments
+###############################
+
+# update the fragments path:
+
+f <- Fragments(seurat_obj)[[1]]
+head(f@cells)
+
+# update fragments
+samples <- unique(seurat_obj$Sample)
+frag_list <- list()
+for(i in 1:length(Fragments(seurat_obj))){
+
+
+  f <- Fragments(seurat_obj)[[i]]
+  f@path <- gsub('dfs3b', 'dfs7', f@path)
+  frag_list[[i]] <- f
+
+}
+Fragments(seurat_obj) <- NULL
+Fragments(seurat_obj) <- frag_list
+
+
+
+
+cur_gene <- 'SST' # really good
+# VIP PVALB SST LAMP5
+
+cur_region <- Annotation(seurat_obj) %>% subset(gene_name == cur_gene)
+cur_chr <- unique(as.character(seqnames(cur_region)))
+plot_region <- paste(cur_chr, min(start(cur_region)),max(end(cur_region)), sep='-')
+width(cur_region) %>% max
+
+
+cov_plot1 <- Signac::CoveragePlot(
+  seurat_obj,
+  region=cur_gene,
+  group.by='celltype',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+
+pdf(paste0(fig_dir, 'coverage_plots/', cur_gene, "_coverageplot_celltype.pdf"), height=10, width=5)
+cov_plot1
+dev.off()
+
+saveRDS(seurat_obj, file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated.rds')
+
+```
+
+
+Make a GRanges object with all of the Cicero outputs:
+
+```{r eval=FALSE}
+
+###########################################################
+# PiD analysis
+###########################################################
+
+cicero_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/PiDnControl/'
+
+
+# get a list of the cicero outputs for each group:
+conn_files <- dir(cicero_dir)[grepl('connections', dir(cicero_dir))]
+
+#load(paste0(cicero_dir, "ODC_cicero_connections.rda"))
+
+# settings
+coaccess_percentile <- 0.95
+
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak %>% unique
+
+# loop over all the cicero outputs:
+link_list <- list()
+for(i in 1:length(conn_files)){
+
+  # get celltype from file name
+  cur_file <- conn_files[i]
+  cur_celltype <- strsplit(cur_file, '_')[[1]][1]
+  print(cur_celltype)
+
+  # load the dataset for this celltype
+  load(paste0(cicero_dir, cur_file))
+
+  # combine the Control + Disease connections into one table
+  # nevermind, don't do this!!!!
+  conns_PiD$condition <- 'PiD'
+  conns_control$condition <- 'Control'
+  conns_list <- list(conns_PiD, conns_control)
+
+  for(conns in conns_list){
+
+    conns$celltype <- cur_celltype
+    cur_group <- unique(conns$condition)
+    print(cur_group)
+
+    # get all non-zero links:
+    link_df <- conns %>% subset(coaccess > 0)
+    link_df$Peak1 <- as.character(link_df$Peak1)
+    link_df$Peak2 <- as.character(link_df$Peak2)
+
+    # nearest gene & peakType for peak1
+    temp <- peaks[match(link_df$Peak1, peaks$peak),]
+    link_df$Peak1_nearestGene <- temp$nearestGene
+    link_df$Peak1_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak1)
+
+    # nearest gene & peakType for peak2
+    temp <- peaks[match(link_df$Peak2, peaks$peak),]
+    link_df$Peak2_nearestGene <- temp$nearestGene
+    link_df$Peak2_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak2)
+
+    # just get entries where Peak1 is a promoter
+    link_df <- link_df %>% subset(
+      Peak1_type == 'Promoter' &
+      Peak2_type != 'Promoter'
+    )
+
+    # distance between peak and target gene
+    peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+    peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+    link_df$distance_bp <- abs(start(peak1_ranges) - start(peak2_ranges))
+
+    # threshold for co-accessibility
+    link_df_full <- link_df
+
+    coaccess_thresh <- quantile(link_df_full$coaccess, coaccess_percentile)
+    coaccess_thresh
+
+    dim(link_df_full[link_df$coaccess >= coaccess_thresh,])
+    link_df <- link_df_full[link_df$coaccess >= coaccess_thresh,]
+
+    # save results
+    write.csv(link_df, file=paste0(data_dir, cur_celltype, '_', cur_group, '_gl-cCREs.csv'), row.names=FALSE, quote=FALSE)
+    write.csv(link_df_full, file=paste0(data_dir, cur_celltype, '_', cur_group,'_full_link_table.csv'), row.names=FALSE, quote=FALSE)
+
+    link_list[[paste0(cur_celltype, '_', cur_group)]] <- link_df
+
+  }
+
+}
+
+# combine into one dataframe:
+combined_df <- do.call(rbind, link_list)
+write.csv(combined_df, file=paste0(data_dir, 'enhancer_gene_map_combined_PiD.csv'), row.names=FALSE, quote=FALSE)
+
+
+# make GRanges objects for peak1 & peak2
+peak1_ranges <- Signac::StringToGRanges(combined_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(combined_df$Peak2, sep=c('-', '-'))
+
+
+###########################################################
+# AD analysis
+###########################################################
+
+cicero_dir <- '/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Analysis/Cis_regulatory_network/ADnControl/'
+
+
+# get a list of the cicero outputs for each group:
+conn_files <- dir(cicero_dir)[grepl('connections', dir(cicero_dir))]
+
+load(paste0(cicero_dir, "ODC_cicero_connections.rda"))
+
+
+# settings
+coaccess_percentile <- 0.95
+
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak %>% unique
+
+# loop over all the cicero outputs:
+link_list <- list()
+for(i in 1:length(conn_files)){
+
+  # get celltype from file name
+  cur_file <- conn_files[i]
+  cur_celltype <- strsplit(cur_file, '_')[[1]][1]
+  print(cur_celltype)
+
+  # load the dataset for this celltype
+  load(paste0(cicero_dir, cur_file))
+
+  conns_AD$condition <- 'AD'
+  conns_control$condition <- 'Control'
+  conns_list <- list(conns_AD, conns_control)
+
+  for(conns in conns_list){
+
+    conns$celltype <- cur_celltype
+    cur_group <- unique(conns$condition)
+    print(cur_group)
+
+    # get all non-zero links:
+    link_df <- conns %>% subset(coaccess > 0)
+    link_df$Peak1 <- as.character(link_df$Peak1)
+    link_df$Peak2 <- as.character(link_df$Peak2)
+
+    # nearest gene & peakType for peak1
+    temp <- peaks[match(link_df$Peak1, peaks$peak),]
+    link_df$Peak1_nearestGene <- temp$nearestGene
+    link_df$Peak1_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak1)
+
+    # nearest gene & peakType for peak2
+    temp <- peaks[match(link_df$Peak2, peaks$peak),]
+    link_df$Peak2_nearestGene <- temp$nearestGene
+    link_df$Peak2_type <- temp$peakType
+    all.equal(temp$peak, link_df$Peak2)
+
+    # just get entries where Peak1 is a promoter
+    link_df <- link_df %>% subset(
+      Peak1_type == 'Promoter' &
+      Peak2_type != 'Promoter'
+    )
+
+    # distance between peak and target gene
+    peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+    peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+    link_df$distance_bp <- abs(start(peak1_ranges) - start(peak2_ranges))
+
+    # threshold for co-accessibility
+    link_df_full <- link_df
+
+    coaccess_thresh <- quantile(link_df_full$coaccess, coaccess_percentile)
+    coaccess_thresh
+
+    dim(link_df_full[link_df$coaccess >= coaccess_thresh,])
+    link_df <- link_df_full[link_df$coaccess >= coaccess_thresh,]
+
+    # save results
+    write.csv(link_df, file=paste0(data_dir, cur_celltype, '_', cur_group, '_gl-cCREs_AD.csv'), row.names=FALSE, quote=FALSE)
+    write.csv(link_df_full, file=paste0(data_dir, cur_celltype, '_', cur_group,'_full_link_table_AD.csv'), row.names=FALSE, quote=FALSE)
+
+    link_list[[paste0(cur_celltype, '_', cur_group)]] <- link_df
+
+  }
+
+}
+
+# combine into one dataframe:
+combined_df <- do.call(rbind, link_list)
+write.csv(combined_df, file=paste0(data_dir, 'enhancer_gene_map_combined_AD.csv'), row.names=FALSE, quote=FALSE)
+
+
+# make GRanges objects for peak1 & peak2
+peak1_ranges <- Signac::StringToGRanges(combined_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(combined_df$Peak2, sep=c('-', '-'))
+
+```
+
+Comparing co-accessibility scores between AD & PiD
+
+```{r eval=FALSE}
+
+cur_celltype <- 'ASC'
+plot_list <- list()
+cor_list <- list()
+for(cur_celltype in unique(seurat_obj$celltype)){
+
+  print(cur_celltype)
+
+  link_df_ad <- read.csv(file=paste0(data_dir, cur_celltype, '_AD_full_link_table_AD.csv')) %>% subset(Peak2_type != 'Exonic')
+  link_df_pid <- read.csv(file=paste0(data_dir, cur_celltype, '_PiD_full_link_table.csv')) %>% subset(Peak2_type != 'Exonic')
+
+  # add column for the two peaks
+  link_df_ad$link <- paste0(link_df_ad$Peak1, '_', link_df_ad$Peak2)
+  link_df_pid$link <- paste0(link_df_pid$Peak1, '_', link_df_pid$Peak2)
+
+  # add missing links to each
+  missing_ad <- link_df_pid$link[!(link_df_pid$link %in% link_df_ad$link)]
+  missing_pid <- link_df_ad$link[!(link_df_ad$link %in% link_df_pid$link)]
+  link_df_ad[missing_ad,] <- NA
+  link_df_ad[missing_ad,'link'] <- missing_ad
+  link_df_ad[missing_ad,'coaccess'] <- 0
+  link_df_pid[missing_pid,] <- NA
+  link_df_pid[missing_pid,'link'] <- missing_pid
+  link_df_pid[missing_pid,'coaccess'] <- 0
+
+  # set rownames
+  rownames(link_df_pid) <- link_df_pid$link
+  rownames(link_df_ad) <- link_df_ad$link
+
+  # re-order so they match
+  link_df_pid <- link_df_pid[link_df_ad$link,]
+  all.equal(link_df_pid$link, link_df_ad$link)
+
+
+  plot_df <- data.frame(
+    link = link_df_ad$link,
+    coaccess_ad = link_df_ad$coaccess,
+    coaccess_pid = link_df_pid$coaccess
+  )
+
+  cor_list[cur_celltype] <- cor(link_df_pid$coaccess, link_df_ad$coaccess)
+
+
+
+  p <- plot_df %>%
+    ggplot(aes(x = coaccess_ad, y = coaccess_pid)) +
+    geom_hex(bins = 50) +
+    geom_abline(intercept=0, slope=1, linetype='dashed', color='black') +
+    scale_fill_gradientn(colors=rev(plasma(256)), trans="log") +
+    stat_cor(method='pearson') +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      panel.border = element_rect(colour = "black", fill=NA, size=1),
+      plot.title = element_text(hjust=0.5, face='bold')
+    ) +
+    xlab('AD coaccessibility') +
+    ylab('PiD coaccessibility') +
+    ggtitle(cur_celltype) +
+    coord_fixed() +
+    scale_x_continuous(limits=c(0,1), breaks=c(0,0.5,1)) +
+    scale_y_continuous(limits=c(0,1), breaks=c(0,0.5,1))
+    #guides(fill=guide_colorbar(ticks.colour = NA, ticks=NA, label=FALSE))
+
+  plot_list[[cur_celltype]] <- p + NoLegend()
+
+  pdf(paste0(fig_dir, 'coaccess_compare_pid_ad_', cur_celltype,'.pdf'), width=6,height=4)
+  print(p)
+  dev.off()
+}
+
+rev(order(unlist(cor_list)))
+
+
+pdf(paste0(fig_dir, 'coaccess_compare_pid_ad.pdf'), width=12,height=6)
+wrap_plots(plot_list[rev(order(unlist(cor_list)))], ncol=4)
+dev.off()
+
+
+
+```
+
+## Load TF footprinting results from TOBIAS
+
+```{r eval=FALSE}
+
+celltypes <- unique(seurat_obj$celltype)
+
+###########################################################
+# PiD analysis
+###########################################################
+
+tobias_dir <- '/dfs7/swaruplab/smorabit/analysis/PiD_2021/tobias/PiD/footprint_compare/'
+
+#  cur_celltype <- 'ASC'
+for(cur_celltype in celltypes){
+
+  print(cur_celltype)
+
+  cur_dir <- paste0(tobias_dir, 'BINDetect_output_PiDvscontrol_', cur_celltype, '/')
+
+  # motif outputs:
+  tfs <- list.dirs(cur_dir, recursive=FALSE, full.names=FALSE)
+
+  tf_list <- lapply(tfs, function(tf){
+    cur_file <- paste0(cur_dir, tf, '/', tf, '_overview.txt')
+    if(file.exists(cur_file)){
+      return(read.table(file=cur_file, header=TRUE))
+    }
+  })
+  combined_tfs <- do.call(rbind, tf_list)
+
+  # rename cols and combine
+  colnames(combined_tfs)[10] <- 'control_score'
+  colnames(combined_tfs)[11] <- 'dx_score'
+  colnames(combined_tfs)[12] <- 'control_bound'
+  colnames(combined_tfs)[13] <- 'dx_bound'
+  colnames(combined_tfs)[14] <- 'log2FC'
+
+  # save the result for this celltype
+  print('writing...')
+  write.csv(combined_tfs, file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_PiD.csv'), row.names=FALSE, quote=FALSE)
+
+}
+
+
+###########################################################
+# AD analysis
+###########################################################
+
+tobias_dir <- '/dfs7/swaruplab/smorabit/analysis/PiD_2021/tobias/AD/footprint_compare/'
+
+# the motif-level output table
+test <- read.table('/dfs7/swaruplab/smorabit/analysis/PiD_2021/tobias/AD/footprint_compare/BINDetect_output_ADvscontrol_ASC/bindetect_results.txt', header=TRUE)
+
+#  cur_celltype <- 'ASC'
+for(cur_celltype in celltypes){
+
+  print(cur_celltype)
+
+  cur_dir <- paste0(tobias_dir, 'BINDetect_output_ADvscontrol_', cur_celltype, '/')
+
+  # motif outputs:
+  tfs <- list.dirs(cur_dir, recursive=FALSE, full.names=FALSE)
+
+  tf_list <- lapply(tfs, function(tf){
+    cur_file <- paste0(cur_dir, tf, '/', tf, '_overview.txt')
+    if(file.exists(cur_file)){
+      return(read.table(file=cur_file, header=TRUE))
+    }
+  })
+  combined_tfs <- do.call(rbind, tf_list)
+
+  # rename cols and combine
+  colnames(combined_tfs)[10] <- 'control_score'
+  colnames(combined_tfs)[11] <- 'dx_score'
+  colnames(combined_tfs)[12] <- 'control_bound'
+  colnames(combined_tfs)[13] <- 'dx_bound'
+  colnames(combined_tfs)[14] <- 'log2FC'
+
+  # save the result for this celltype
+  print('writing...')
+  write.csv(combined_tfs, file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_AD.csv'), row.names=FALSE, quote=FALSE)
+
+}
+
+###########################################################
+# Load the TF-level results for AD & PiD
+###########################################################
+
+cur_celltype <- 'ASC'
+
+ad_dir <- '/dfs7/swaruplab/smorabit/analysis/PiD_2021/tobias/AD/footprint_compare/'
+pid_dir <- '/dfs7/swaruplab/smorabit/analysis/PiD_2021/tobias/PiD/footprint_compare/'
+
+footprint_list <- list()
+for(cur_celltype in celltypes){
+
+  print(cur_celltype)
+
+  # load TOBIAS tables
+  ad_df <- read.table(paste0(ad_dir, 'BINDetect_output_ADvscontrol_', cur_celltype, '/bindetect_results.txt'), header=TRUE)
+  pid_df <- read.table(paste0(pid_dir, 'BINDetect_output_PiDvscontrol_', cur_celltype, '/bindetect_results.txt'), header=TRUE)
+
+  # re-name columns:
+  colnames(ad_df)[6] <- 'control_score'
+  colnames(ad_df)[7] <- 'control_bound'
+  colnames(ad_df)[8] <- 'dx_score'
+  colnames(ad_df)[9] <- 'dx_bound'
+  colnames(ad_df)[10] <- 'avg_logFC'
+  colnames(ad_df)[11] <- 'pval'
+  colnames(pid_df)[6] <- 'control_score'
+  colnames(pid_df)[7] <- 'control_bound'
+  colnames(pid_df)[8] <- 'dx_score'
+  colnames(pid_df)[9] <- 'dx_bound'
+  colnames(pid_df)[10] <- 'avg_logFC'
+  colnames(pid_df)[11] <- 'pval'
+
+  # add column for dataset & cell type
+  ad_df$Study <- "AD"
+  ad_df$celltype <- cur_celltype
+  pid_df$Study <- "PiD"
+  pid_df$celltype <- cur_celltype
+
+  # combine dfs
+  df <- rbind(ad_df, pid_df)
+  footprint_list[[cur_celltype]] <- df
+
+}
+footprint_df <- do.call(rbind, footprint_list)
+
+# reverse the fold-change so disease is up and control is down
+footprint_df$avg_logFC <- -1 * footprint_df$avg_logFC
+
+# write to file
+write.csv(footprint_df, file=paste0(data_dir, 'TOBIAS_bindetec_results_combined.csv'), row.names=FALSE, quote=FALSE)
+
+# re-load
+footprint_df <- read.csv(file=paste0(data_dir, 'TOBIAS_bindetec_results_combined.csv'))
+
+```
+
+Plot the TF footprint volcano plots for each cell type
+
+```{r eval=FALSE}
+
+# label the top and bottom 5
+
+nlabel <- 10
+color1 <- 'darkgoldenrod3'; color2 <- 'hotpink3'
+logFC_thresh <- 0.025
+
+plot_df <- data.frame()
+for(cur_celltype in unique(footprint_df$celltype)){
+  for(cur_study in unique(footprint_df$Study)){
+    cur <- subset(footprint_df, celltype == cur_celltype & Study == cur_study)
+
+    # get colors
+    color1 <- dx_cp[cur_study]
+    color2 <- dx_cp['Control']
+
+    # compute FDR
+    cur$FDR <- p.adjust(cur$pval, method='fdr')
+
+    top_thresh <- cur %>% subset(pval < 0.05 & avg_logFC >= logFC_thresh) %>% top_n(nlabel, wt=avg_logFC) %>% .$avg_logFC %>% min
+    bottom_thresh <- cur %>% subset(pval < 0.05  & avg_logFC <= logFC_thresh) %>% top_n(-1*nlabel, wt=avg_logFC) %>% .$avg_logFC %>% max
+
+    cur$anno <- ifelse(cur$pval < 0.05 & cur$avg_logFC >= top_thresh, cur$name, NA)
+    cur$anno <- ifelse(cur$pval < 0.05 & cur$avg_logFC <= bottom_thresh, cur$name, cur$anno)
+    cur$color <- ifelse(cur$pval > 0.05 , 'gray', ifelse(cur$avg_logFC > 0, color1, color2))
+    cur$color <- ifelse(abs(cur$avg_logFC) >= logFC_thresh, cur$color, 'grey85')
+    cur$anno <- ifelse(abs(cur$avg_logFC) >= logFC_thresh, cur$anno, NA)
+
+    plot_df <- rbind(plot_df, cur)
+  }
+}
+
+# make volcano plots
+plot_list <- list()
+for(cur_study in unique(footprint_df$Study)){
+  for(cur_celltype in unique(footprint_df$celltype)){
+
+    cur_df <- plot_df %>% subset(celltype == cur_celltype & Study == cur_study)
+
+    # base plot
+    p <- cur_df %>%
+      ggplot(aes(x = avg_logFC, y = -log10(FDR))) +
+      geom_hline(yintercept=-log10(0.05), linetype='dashed')
+
+    # add points:
+    p <- p + ggrastr::rasterise(geom_point(alpha=0.5, color=cur_df$color), dpi=500)
+
+    # add labeled points:
+    p <- p +
+      geom_point(
+        inherit.aes=FALSE,
+        data=subset(cur_df, !is.na(anno)),
+        aes(avg_logFC, -log10(FDR)),
+        fill=subset(cur_df, !is.na(anno)) %>% .$color,
+        #fill = 'blue',
+        shape=21, size=2, color='black'
+      ) +
+      geom_text_repel(
+        aes(label=anno),
+        color='black',
+        min.segment.length=0,
+        max.overlaps=Inf
+      )
+
+    # add extras:
+    p <- p +
+      ggtitle(paste0(cur_celltype, ' ', cur_study)) +
+      xlab('Differential binding score') +
+      theme(
+        panel.grid.major = element_blank(),
+        plot.title = element_text(hjust = 0.5, face='bold'),
+        panel.border = element_rect(fill=NA, color='black', size=1),
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank()
+      )
+
+
+    # add to plot list:
+    plot_list[[paste0(cur_celltype, '_', cur_study)]] <- p
+
+  }
+}
+
+
+library(patchwork)
+
+pdf(paste0(fig_dir, 'footprint_volcano_combined.pdf'), width=28, height=8)
+wrap_plots(plot_list, ncol=7)
+dev.off()
+
+pdf(paste0(fig_dir, 'footprint_volcano.pdf'), width=4, height=4)
+for(plot in plot_list){
+  print(plot)
+}
+dev.off()
+
+
+footprint_df[grepl('SREBF', footprint_df$name),] %>% subset(celltype == 'ODC' & pval < 0.05)
+
+
+################################################################################
+# LogFC in AD versus logFC in PiD
+################################################################################
+
+nlabel <- 5
+plot_list <- list()
+for(cur_celltype in unique(footprint_df$celltype)){
+
+  print(cur_celltype)
+
+  f_ad <- subset(footprint_df, Study == 'AD' & celltype == cur_celltype)
+  f_pid <- subset(footprint_df, Study == 'PiD' & celltype == cur_celltype)
+
+  plot_df <- data.frame(
+    name = f_ad$name,
+    motif_id = f_ad$motif_id,
+    ad_logFC = f_ad$avg_logFC,
+    ad_pval = f_ad$pval,
+    pid_logFC = f_pid$avg_logFC,
+    pid_pval = f_pid$pval
+  )
+
+  # compute FDR
+  plot_df$ad_fdr <- p.adjust(plot_df$ad_pval, method='fdr')
+  plot_df$pid_fdr <- p.adjust(plot_df$pid_pval, method='fdr')
+
+  logFC_thresh <- 0.0
+  plot_df$group <- ifelse(plot_df$ad_logFC >= logFC_thresh & plot_df$pid_logFC >= logFC_thresh, "Consistent", "")
+  plot_df$group <- ifelse(plot_df$ad_logFC <= -logFC_thresh & plot_df$pid_logFC <= -logFC_thresh, "Consistent", plot_df$group)
+  plot_df$group <- ifelse(plot_df$ad_logFC >= logFC_thresh & plot_df$pid_logFC <= -logFC_thresh, "Inconsistent", plot_df$group)
+  plot_df$group <- ifelse(plot_df$ad_logFC <= -logFC_thresh & plot_df$pid_logFC >= logFC_thresh, "Inconsistent", plot_df$group)
+  group_colors <- c(as.character(cp[cur_celltype]), 'grey')
+
+
+  # get TFs to label in upper right quadrant
+  cur_df <- subset(plot_df, ad_logFC > 0 & pid_logFC > 0) %>% mutate(rank = ad_logFC + pid_logFC)
+  ad_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_id
+  pid_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_df
+  cur_labels <- unique(c(ad_label, pid_label))
+  print(cur_labels)
+  plot_df$anno <- ifelse(plot_df$motif_id %in% cur_labels, plot_df$name, NA)
+
+  # get TFs to label in lowerright quadrant
+  cur_df <- subset(plot_df, ad_logFC > 0 & pid_logFC < 0) %>% mutate(rank = ad_logFC - pid_logFC)
+  ad_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_id
+  pid_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_df
+  cur_labels <- unique(c(ad_label, pid_label))
+  print(cur_labels)
+  plot_df$anno <- ifelse(plot_df$motif_id %in% cur_labels, plot_df$name, plot_df$anno)
+
+  # get TFs to label in upper left quadrant
+  cur_df <- subset(plot_df, ad_logFC < 0 & pid_logFC > 0) %>% mutate(rank =pid_logFC - ad_logFC)
+  ad_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_id
+  pid_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_df
+  cur_labels <- unique(c(ad_label, pid_label))
+  print(cur_labels)
+  plot_df$anno <- ifelse(plot_df$motif_id %in% cur_labels, plot_df$name, plot_df$anno)
+
+  # get TFs to label in lower left quadrant
+  cur_df <- subset(plot_df, ad_logFC < 0 & pid_logFC < 0) %>% mutate(rank = -1*(pid_logFC + ad_logFC))
+  ad_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_id
+  pid_label <- cur_df %>% slice_max(n=nlabel, order_by=rank) %>% .$motif_df
+  cur_labels <- unique(c(ad_label, pid_label))
+  print(cur_labels)
+  plot_df$anno <- ifelse(plot_df$motif_id %in% cur_labels, plot_df$name, plot_df$anno)
+
+
+  # significant in one or the other
+  #subset(plot_df, ad_pval < 0.05 | ad_pval < 0.05) %>% dim
+  plot_df <- subset(plot_df, ad_fdr < 0.05 | ad_fdr < 0.05)
+  print(dim(plot_df))
+
+  p <- plot_df %>%
+    ggplot(aes(x = ad_logFC, y = pid_logFC, color=group)) +
+    geom_hline(yintercept = 0, linetype='dashed', color='grey') +
+    geom_vline(xintercept = 0, linetype='dashed', color='grey') +
+    ggrastr::rasterise(geom_point(), dpi=500) +
+    geom_point(
+      inherit.aes=FALSE,
+      data=subset(plot_df, !is.na(anno)),
+      aes(x = ad_logFC, y = pid_logFC, fill=group),
+      shape=21, size=2, color='black'
+    ) +
+    geom_text_repel(
+      aes(label=anno),
+      color='black',
+      min.segment.length=0,
+      max.overlaps=Inf
+    ) +
+    scale_color_manual(values=group_colors) +
+    scale_fill_manual(values=group_colors) +
+    geom_smooth(method='lm', color='black') +
+    stat_cor(inherit.aes=FALSE, data=plot_df, aes(x = ad_logFC, y = pid_logFC), method='pearson') +
+    theme(
+      axis.line.x = element_blank(),
+      axis.line.y = element_blank(),
+      panel.border = element_rect(colour = "black", fill=NA, size=1),
+      plot.title = element_text(hjust=0.5, face='bold')
+    ) + NoLegend() +
+    xlab('AD differential binding score') +
+    ylab('PiD differential binding score') +
+    ggtitle(cur_celltype)
+
+  plot_list[[cur_celltype]] <- p
+
+}
+
+pdf(paste0(fig_dir, 'footprint_differential_compare.pdf'), width=5, height=5)
+for(p in plot_list){
+  print(p)
+}
+dev.off()
+
+
+
+```
+
+Binding site overlap analysis
+
+1. compute overlap stats between PiD & AD for each TF using Gene Overlap package
+2. Get a list of TF target genes that overlap / don't overlap at enhancers & promoters
+3. GO term enrichment in these gene lists.
+
+```{r eval=FALSE}
+
+library(GeneOverlap)
+
+cur_celltype <- 'ASC'
+
+linked_peaks <- unique(c(map_AD$Peak2, map_PiD$Peak2))
+
+# read the tfbs tables for AD & PiD
+tfbs_ad <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_AD.csv'))
+tfbs_pid <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_PiD.csv'))
+
+# add column for the tfbs coords
+tfbs_ad$TFBS_coords <- paste0(tfbs_ad$TFBS_chr, '-', tfbs_ad$TFBS_start, '-', tfbs_ad$TFBS_end)
+tfbs_pid$TFBS_coords <- paste0(tfbs_pid$TFBS_chr, '-', tfbs_pid$TFBS_start, '-', tfbs_pid$TFBS_end)
+
+# add column for the peak coords
+# tfbs_ad$peak_coords <- paste0(tfbs_ad$peak_chr, '-', tfbs_ad$peak_start, '-', tfbs_ad$peak_end)
+# tfbs_pid$peak_coords <- paste0(tfbs_pid$peak_chr, '-', tfbs_pid$peak_start, '-', tfbs_pid$peak_end)
+
+# list of TFs
+tfs <- unique(tfbs_ad$TFBS_name)
+
+cur_tf <- tfs[1]
+
+overlap_df <- do.call(rbind, lapply(tfs[1:25], function(cur_tf){
+
+  print(cur_tf)
+
+  # get tables for current motif
+  cur_ad <- subset(tfbs_ad, TFBS_name == cur_tf)
+  cur_pid <- subset(tfbs_pid, TFBS_name == cur_tf)
+
+  # subset by
+  genome.size <- nrow(cur_ad)
+
+  cur_bound_ad <- subset(cur_ad, dx_bound == 1 & peak_coords %in% linked_peaks) %>% .$TFBS_coords
+  cur_bound_pid <- subset(cur_pid, dx_bound == 1 & peak_coords %in% linked_peaks) %>% .$TFBS_coords
+
+  cur_overlap <- testGeneOverlap(newGeneOverlap(
+      cur_bound_ad,
+      cur_bound_pid,
+      genome.size=genome.size
+  ))
+
+  # plot the ad bound score vs pid bound score
+  plot_df <- cur_ad %>% select(c(TFBS_coords, TFBS_name, dx_score, dx_bound))
+  colnames(plot_df)[3:4] <- c('AD_score', 'AD_bound')
+  plot_df$PiD_score <- cur_pid$dx_score
+  plot_df$PiD_bound <- cur_pid$dx_bound
+
+  cor_result <- cor.test(plot_df$AD_score, plot_df$PiD_score, method='pearson')
+
+  c(cur_overlap@odds.ratio, cur_overlap@pval, cur_overlap@Jaccard, length(cur_overlap@intersection), length(cur_bound_ad), length(cur_bound_pid), as.numeric(cor_result$estimate), cor_result$p.value)
+}))  %>% as.data.frame
+colnames(overlap_df) <- c('odds_ratio', 'pval', 'Jaccard', 'size_intersection', 'nbound_ad', 'nbound_pid', 'cor', 'cor_pval')
+overlap_df$tf <- as.character(tfs[1:25])
+
+# save the overlap result
+write.csv(overlap_df, file=paste0(data_dir, 'tfbs_overlap_', cur_celltype, '.csv'), row.names=FALSE, quote=FALSE)
+
+
+
+# plot the ad bound score vs pid bound score
+plot_df <- cur_ad %>% select(c(TFBS_coords, TFBS_name, dx_score, dx_bound))
+colnames(plot_df)[3:4] <- c('AD_score', 'AD_bound')
+plot_df$PiD_score <- cur_pid$dx_score
+plot_df$PiD_bound <- cur_pid$dx_bound
+
+# bound vs unbound
+plot_df$bound <- ifelse(plot_df$AD_bound == 1 & plot_df$PiD_bound == 1, 'both bound', 'other')
+
+# test <- subset(map_both, Peak2 %in% plot_df$peak_coords) %>%
+#   select(c(Peak1_nearestGene, Peak2))
+
+
+
+p <- plot_df %>%
+  ggplot(aes(x=AD_score, y=PiD_score, color=bound)) +
+  geom_point() +
+  geom_smooth(method='lm', color='black') +
+  #stat_cor(method='pearson') +
+  stat_cor(inherit.aes=FALSE, data=plot_df, aes(x=AD_score, y=PiD_score), method='pearson') +
+  theme(
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=1),
+    plot.title = element_text(hjust=0.5, face='bold')
+  ) + NoLegend() +
+  xlab('AD binding score') +
+  ylab('PiD binding score')
+
+
+
+pdf(paste0(fig_dir, 'test_motif_compare.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+
+
+
+
+
+  deg_df$group <- deg_df[,group_col]
+  cell_groups <- deg_df$group %>% unique
+
+  # get modules,
+  modules <- GetModules(seurat_obj)
+  mods <- levels(modules$module)
+  mods <- mods[mods != 'grey']
+
+  # subset deg_df by fold change cutoff:
+  if(fc_cutoff >=0 ){
+    deg_df <- subset(deg_df, avg_log2FC >= fc_cutoff)
+  } else{
+    deg_df <- subset(deg_df, avg_log2FC <= fc_cutoff)
+
+    # reverse the sign of the remaining fold changes
+    deg_df$avg_log2FC <- -1 * deg_df$avg_log2FC
+    fc_cutoff <- -1 * fc_cutoff
+  }
+
+  # size of genome based on # genes in Seurat object:
+  genome.size <- nrow(seurat_obj)
+
+  # run overlaps between module gene lists and DEG lists:
+  overlap_df <- do.call(rbind, lapply(mods, function(cur_mod){
+    cur_module_genes <- modules %>% subset(module == cur_mod) %>% .$gene_name
+    cur_overlap_df <- do.call(rbind, lapply(cell_groups, function(cur_group){
+      cur_DEGs <- deg_df %>% subset(group == cur_group & p_val_adj <= 0.05 & avg_log2FC > fc_cutoff) %>% .$gene
+      cur_overlap <- testGeneOverlap(newGeneOverlap(
+          cur_module_genes,
+          cur_DEGs,
+          genome.size=genome.size
+      ))
+      c(cur_overlap@odds.ratio, cur_overlap@pval, cur_overlap@Jaccard, length(cur_overlap@intersection))
+    })) %>% as.data.frame
+    colnames(cur_overlap_df) <- c('odds_ratio', 'pval', 'Jaccard', 'size_intersection')
+    cur_overlap_df$module <- cur_mod
+    cur_overlap_df$group <- cell_groups
+
+    # module color:
+    cur_overlap_df$color <- modules %>% subset(module == cur_mod) %>% .$color %>% unique
+    cur_overlap_df
+  }))
+
+
+  # adjust for multiple comparisons:
+  overlap_df$fdr <- p.adjust(overlap_df$pval, method='fdr')
+
+  # significance level:
+  overlap_df$Significance <- gtools::stars.pval(overlap_df$fdr)
+  overlap_df$Significance <- ifelse(
+    overlap_df$Significance == '.', '',
+    overlap_df$Significance
+  )
+
+  # set factor levels for modules:
+  overlap_df$module <- factor(overlap_df$module, levels=mods)
+
+  # re-arrange columns:
+  overlap_df <- overlap_df %>% dplyr::select(c(module, group, color, odds_ratio, pval, fdr, Significance, Jaccard, size_intersection))
+
+  overlap_df
+
+
+
+```
+
+
+
+
+
+NMF to cluster enhancer peaks
+
+```{r eval=FALSE}
+
+library(hdWGCNA)
+library(RColorBrewer)
+library(NMF)
+library(ComplexHeatmap)
+
+# load enhancer-gene maps
+map_AD <- read.csv(file=paste0(ze_data_dir, 'enhancer_gene_map_combined_AD.csv'))
+map_PiD <- read.csv(file=paste0(ze_data_dir, 'enhancer_gene_map_combined_PiD.csv'))
+
+map_AD$Study <- 'AD'; map_PiD$Study <- 'PiD'
+map_both <- rbind(map_AD, map_PiD)
+
+map_both$plot_condition <- ifelse(
+  map_both$condition == 'Control' & map_both$Study == 'AD',
+  'Control (AD)', ifelse(
+    map_both$condition == 'Control' & map_both$Study == 'PiD',
+    'Control (PiD)', map_both$condition
+  )
+)
+map_both$plot_condition <- factor(
+  as.character(map_both$plot_condition),
+  levels = c('Control (AD)', 'AD', 'Control (PiD)', 'PiD')
+)
+
+####################################################################
+# Plot the distribution of co-accessibility scores in each cell type
+####################################################################
+
+p <- map_both %>% subset(Peak2_type != 'Exonic') %>%
+  ggplot(aes(x=coaccess, y=plot_condition, fill=celltype)) +
+  geom_density_ridges(
+    quantiles = c(0.75),
+    quantile_lines = TRUE, alpha=0.8
+  ) +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  xlab('Enhancer-gene co-accessibility') +
+  ylab('Density') +
+  scale_x_continuous(breaks=c(0, 0.5, 1)) + NoLegend()
+
+pdf(paste0(fig_dir, 'coaccess_histogram.pdf'), width=8, height=2.5)
+p + facet_grid(~celltype)
+dev.off()
+
+####################################################################
+# Select peaks to use for NMF:
+####################################################################
+
+coaccess_quantile <- 0.9
+
+peaks_NMF <- c()
+for(cur_celltype in unique(map_both$celltype)){
+  for(cur_condition in unique(map_both$plot_condition)){
+
+    # get links for this condition
+    cur_map <- subset(map_both, celltype == cur_celltype & plot_condition == cur_condition & Peak2_type != 'Exonic')
+
+    # coaccess cutoff:
+    cutoff <- as.numeric(quantile(cur_map$coaccess, coaccess_quantile))
+    cur_map <- subset(cur_map, coaccess >= cutoff)
+
+    # get peaks
+    cur_peaks <- unique(cur_map$Peak2)
+    print(length(cur_peaks))
+    peaks_NMF <- c(peaks_NMF, cur_peaks)
+
+  }
+}
+peaks_NMF <- unique(peaks_NMF)
+length(peaks_NMF)
+
+test <- subset(map_both, Peak2 %in% peaks_NMF)
+table(test$celltype, test$plot_condition)
+
+test_peak <- test %>% select(c(Peak2, Peak2_type)) %>% distinct()
+table(test_peak$Peak2_type)
+
+# subset the enhancer-gene map by these peaks:
+map_NMF <- subset(map_both, Peak2 %in% peaks_NMF)
+dim(map_NMF)
+all(peaks_NMF %in% map_NMF$Peak2)
+
+########################################################
+# setup pseudobulk
+########################################################
+
+# settings for Libra pseudobulk function
+replicate_col <- 'Sample'
+#replicate_col <- 'dataset_diagnosis'
+cell_type_col = 'celltype'
+label_col = 'Diagnosis'
+
+# get accessibility matrix
+X <- GetAssayData(seurat_obj, slot='data', assay='peaks')
+meta <- seurat_obj@meta.data
+meta$celltype <- as.character(meta$celltype)
+
+# get data for selected celltype
+cur_cells <- colnames(seurat_obj)
+X <- X[peaks_NMF,cur_cells]
+meta <- meta[cur_cells,]
+
+seurat_obj$dataset_diagnosis <- paste0(seurat_obj$Dataset, '_', seurat_obj$Diagnosis)
+
+# get the pseudobulk profiles
+pseudobulks = hdWGCNA:::to_pseudobulk(
+  input = X,
+  meta = meta,
+  replicate_col = replicate_col,
+  cell_type_col = cell_type_col,
+  label_col = label_col
+)
+
+# update the column names to include cell types
+# and add any missing peaks back in
+for(ct in names(pseudobulks)){
+  colnames(pseudobulks[[ct]]) <- paste0(colnames(pseudobulks[[ct]]), ':', ct)
+
+  # add missing peaks if there are any
+  if(length(rownames(pseudobulks[[ct]])) != length(peaks_NMF)){
+    missing_peaks <- peaks_NMF[!(peaks_NMF %in% rownames(pseudobulks[[ct]]))]
+    pseudobulks[[ct]][missing_peaks,] <- 0
+
+    # re-order the rows
+    pseudobulks[[ct]] <- pseudobulks[[ct]][peaks_NMF,]
+  }
+}
+
+# combine the results from the individual cell types
+pseudobulk <- do.call(cbind, pseudobulks)
+
+# scale the data (but not center!)
+pseudobulk <- scale(pseudobulk, center=FALSE)
+
+#####################################################
+# cluster average accessibility matrix using NMF:
+#####################################################
+
+#library(tictoc)
+
+# number of matrix factors
+k = 25
+#tic()
+n_out <- NMF::nmf(pseudobulk, k) # took 2.2 hours
+#toc()
+
+save(n_out, file=paste0(data_dir, 'NMF_output3.rda'))
+load(file=paste0(data_dir, 'NMF_output3.rda'))
+
+# get basis matrix of peaks by factors
+w <- basis(n_out)
+dim(w)
+
+# get coefficient matrix
+h <- coef(n_out)
+rownames(h) <- 1:nrow(h)
+h <- h[,order(colnames(h))]
+
+# get list of top modules in each cluster
+top_modules <- apply(h, 2, function(x){which(x == max(x))})
+top_modules_df <- data.frame(
+  module=top_modules,
+  group=names(top_modules),
+  cluster=do.call(rbind, strsplit(names(top_modules), '_'))[,1],
+  diagnosis=do.call(rbind, strsplit(names(top_modules), '_'))[,2]
+)
+top_modules_df$celltype <- do.call(rbind, strsplit(as.character(top_modules_df$cluster), '[.]'))[,1]
+
+# reorder coefficient matrix based on clusters:
+h_new <- h[as.character(unique(top_modules_df$module)),]
+h <- rbind(h_new, h[!(rownames(h) %in% rownames(h_new)),])
+
+
+
+
+col_ha <- HeatmapAnnotation(
+  celltype = do.call(rbind, strsplit(colnames(h), ':'))[,3]
+)
+
+row_ha <- rowAnnotation(
+  module = anno_simple(as.character(rownames(h)), pch=as.character(rownames(h)))
+)
+
+# plot coefficient matrix to see which modules are specific to each cluster
+pdf('figures/nmf_coefficient_heatmap4.pdf', width=6, height=8)
+ComplexHeatmap::Heatmap(
+  h,
+  col = brewer.pal(9, 'Greens'),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  show_column_names=FALSE,
+  use_raster = TRUE
+
+)
+dev.off()
+
+# assigning each peak to a module
+modules <- as.data.frame(apply(w, 1, function(x){which(x == max(x))}))
+names(modules) <- c('module')
+modules$peak <- rownames(modules)
+modules %<>% arrange(module)
+table(modules$module)
+sum(is.na(modules$module))
+
+# add the NMF module assignment to the enhancer-gene map table
+ix <- match(map_NMF$Peak2, modules$peak)
+map_NMF$module <- modules$module[ix]
+unique(map_NMF$module)
+sum(is.na(map_NMF$module))
+
+head(modules$peak)
+modules$peak %in% map_NMF$Peak2
+table(modules$peak %in% map_NMF$Peak2)
+
+
+
+
+# can we figure out which NMF modules correspond to each cell type?
+# are there any modules that are not cell-type specific?
+test <- as.data.frame(apply(h, 1, function(x){which(x == max(x))}))
+
+# aggregate the h matrix for each celltype
+celltypes <- unique(seurat_obj$celltype)
+h_celltypes <- do.call(cbind, lapply(celltypes, function(cur_celltype){
+  rowSums(h[,grepl(cur_celltype, colnames(h))])
+}))
+colnames(h_celltypes) <- celltypes
+
+test <- as.data.frame(apply(h_celltypes, 1, function(x){
+  celltypes[which(x == max(x))]
+}))
+colnames(test) <- 'celltype'
+test$module <- rownames(test)
+
+test <- arrange(test, celltype)
+
+# any modules missing?
+mods <- unique(modules$module)
+missing_mods <- mods[!(mods %in% test$module)]
+test <- subset(test, module != "")
+mod_levels <- c(as.character(test$module), missing_mods)
+test$module <- factor(as.character(test$module), levels=mod_levels)
+modules$module <- factor(as.character(modules$module), levels=mod_levels)
+
+modules <- arrange(modules, module)
+table(modules$module)
+
+sum(is.na(modules$module))
+
+
+```
+
+Plot chromatin accessibility of these enhancers as a heatmap
+
+```{r eval=FALSE}
+
+
+# get accessibility matrix
+pseudobulk <- pseudobulk[modules$peak,]
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(pseudobulk, 1, zScore) %>% t()
+# matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# range(matrix_z)
+matrix_z <- ifelse(matrix_z >= 3, 3, matrix_z)
+matrix_z <- ifelse(matrix_z <= -2, -2, matrix_z)
+
+row_ha <- rowAnnotation(
+  module = as.character(modules$module)
+)
+
+pdf('figures/nmf_module_accessibility_heatmap_test2.pdf', width=7.5, height=10)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  #col = colfunc.atac,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  show_row_names=FALSE, show_column_names=FALSE,
+  use_raster = TRUE
+)
+dev.off()
+
+
+################################################################################
+# plot with 0 -> 1 scale
+################################################################################
+
+# get accessibility matrix
+pseudobulk <- pseudobulk[modules$peak,]
+
+# function to scale
+scale01 <- function(x){
+  y <- min(x); z <- max(x);
+  (x-y) / (z-y)
+}
+
+# convert to 0 -> 1
+scaled <- apply(pseudobulk, 1, scale01) %>% t()
+
+row_ha <- rowAnnotation(
+  module = as.character(modules$module)
+)
+
+col_ha <- HeatmapAnnotation(
+  celltype = do.call(rbind, strsplit(colnames(h), ':'))[,3]
+)
+
+
+pdf(paste0(fig_dir,'nmf_module_accessibility_heatmap_scaled3.pdf'), width=7.5, height=10)
+ComplexHeatmap::Heatmap(
+  scaled,
+  col = brewer.pal(9, 'Purples'),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  show_row_names=FALSE, show_column_names=FALSE,
+  use_raster = TRUE,
+  split = modules$module,
+  border=TRUE
+)
+dev.off()
+
+   
+################################################################################
+# Only plot selected modules
+################################################################################
+
+# which modules to compute GO terms for?
+mod_df <- data.frame(
+  module = c(3, 5, 12, 8, 10, 22, 13, 14, 24),
+  group = c('EX', 'INH', 'ODC', 'OPC', 'ASC', 'MG', 'PER.END', 'all', 'all')
+)
+
+select_modules <- subset(modules, module %in% mod_df$module)
+select_modules$module <- factor(
+  as.character(select_modules$module), levels=mod_df$module
+)
+select_modules <- arrange(select_modules, module)
+
+cur_scaled <- scaled[select_modules$peak,]
+
+
+# re-order samples:
+head(seurat_obj$Sample)
+table(seurat_obj$celltype)
+table(seurat_obj$Diagnosis)
+
+head(colnames(pseudobulk))
+
+col_order <- c()
+ct_list <- c(); study_list <- c(); condition_list <- c(); sample_list <- c();
+for(ct in c('EX', 'INH', 'ODC', 'OPC', 'ASC', "MG", 'PER.END')){
+  ct_meta <- subset(seurat_obj@meta.data, celltype == ct)
+  for(study in c('PiD', 'AD')){
+    study_meta <- subset(ct_meta, Dataset == study)
+    for(condition in unique(study_meta$Diagnosis)){
+      condition_meta <- subset(study_meta, Diagnosis == condition)
+      for(cur_sample in unique(condition_meta$Sample)){
+        cur_col <- paste0(ct, '.', cur_sample, ':', condition, ":", ct)
+        col_order <- c(col_order, cur_col)
+        ct_list <- c(ct_list, ct)
+        study_list <- c(study_list, study)
+        condition_list <- c(condition_list, condition)
+        sample_list <- c(sample_list, cur_sample)
+      }
+    }
+  }
+}
+
+cur_scaled <- cur_scaled[,col_order]
+
+library(MetBrewer)
+new_colors <- paste0(met.brewer("Signac", n=nrow(mod_df), type='discrete'))
+new_colors <- sample(new_colors, length(new_colors))
+mod_df$color <- new_colors
+mod_cp <- mod_df$color
+names(mod_cp) <- mod_df$module
+
+row_ha <- rowAnnotation(
+  module = as.character(select_modules$module),
+  col = list(module = mod_cp)
+)
+
+test <- as.character(cp)
+names(test) <- names(cp)
+
+col_ha <- HeatmapAnnotation(
+  celltype = ct_list,
+  dataset = study_list,
+  condition = condition_list,
+  col = list(
+    celltype = test,
+    condition = dx_cp,
+    dataset = dx_cp
+  )
+)
+
+pdf('figures/nmf_module_accessibility_heatmap_scaled_sub2.pdf', width=7.5, height=10)
+ComplexHeatmap::Heatmap(
+  cur_scaled,
+  col = brewer.pal(9, 'Purples'),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  show_row_names=FALSE, show_column_names=FALSE,
+  use_raster = TRUE,
+  split = select_modules$module,
+  border=TRUE
+)
+dev.off()
+
+
+
+
+```
+
+Overlap of enhancer-gene links between conditions
+
+```{r eval=FALSE}
+
+
+
+```
+
+
+Run EnrichR on the genes in each module
+
+```{r eval=FALSE}
+
+library(hdWGCNA)
+library(enrichR)
+
+
+# which modules to compute GO terms for?
+mod_df <- data.frame(
+  module = c(3, 5, 12, 8, 10, 22, 13, 14, 24),
+  group = c('EX', 'INH', 'ODC', 'OPC', 'ASC', 'MG', 'PER.END', 'all', 'all')
+)
+
+
+# which enrichr databases?
+dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021', 'WikiPathway_2021_Human', 'KEGG_2021_Human')
+
+# number of top links
+n_links <- 2000
+
+combined_output <- data.frame()
+for(cur_mod in unique(mod_df$module)){
+
+  # which cell type was this module highest in?
+  cur_group <- subset(mod_df, module == cur_mod) %>% .$group
+
+  # subset for this module
+  cur_map <- map_NMF %>%
+    subset(module == cur_mod) %>%
+    select(c(Peak2, Peak1_nearestGene, module, coaccess, celltype, plot_condition)) %>%
+    mutate(link = paste0(Peak2, '_', Peak1_nearestGene))
+
+  # subset for selected group:
+  if(grepl('/', cur_group)){
+    cur_group <- strsplit(cur_group, '/')[[1]]
+  } else if(cur_group == 'all'){
+    cur_group <- unique(map_NMF$celltype)
+  }
+
+  print(cur_mod)
+  print(cur_group)
+  cur_map <- subset(cur_map, celltype %in% cur_group)
+
+  # average the coaccessibility score for each link:
+  mean_map <- cur_map %>% group_by(link) %>% summarise(mean_coaccess = mean(coaccess), max_coaccess = max(coaccess))
+  ix <- match(mean_map$link, cur_map$link)
+  mean_map$gene <- cur_map$Peak1_nearestGene[ix]
+
+  # get the top links:
+  mean_map <- mean_map %>% slice_max(order_by=max_coaccess, n=n_links)
+  cur_genes <- unique(mean_map$gene) %>% as.character
+  print(range(mean_map$max_coaccess))
+
+  enriched <- enrichR::enrichr(cur_genes, dbs)
+
+  # collapse into one db
+  for(db in names(enriched)){
+    cur_df <- enriched[[db]]
+    if (nrow(cur_df) > 1){
+      cur_df$db <- db
+      cur_df$module <- cur_mod
+      combined_output <- rbind(combined_output, cur_df)
+    }
+  }
+}
+enrichr_df <- combined_output %>% subset(P.value < 0.05)
+
+table(enrichr_df$mod, enrichr_df$db)
+
+write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'enhancer_NMF_enrichr.tsv'))
+
+# re-load table
+enrichr_df <- read.delim(file=paste0(data_dir, 'enhancer_NMF_enrichr.tsv'), header=TRUE, sep='\t')
+
+enrichr_df[grepl('yelin', enrichr_df$Term),]
+enrichr_df[grepl('mmune', enrichr_df$Term),]
+enrichr_df[grepl('hago', enrichr_df$Term),]
+enrichr_df[grepl('glia', enrichr_df$Term),]
+enrichr_df[grepl('neuron', enrichr_df$Term),]
+
+
+################################################################################
+# Load Selected GO terms:
+################################################################################
+
+selected_terms <- read.delim('data/NMF_selected_pathways.txt', sep='\t', header=1)
+
+
+# helper function to wrap text
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+# subset selected terms
+selected_terms <- subset(enrichr_df, Term %in% selected_terms$Term & P.value < 0.05)
+
+selected_terms$group <- factor(
+  as.character(selected_terms$module),
+  levels = mod_df$module
+)
+
+# set max pval
+
+quantile(-log(selected_terms$P.value), 0.95)
+max_p <- 10
+
+selected_terms$logp <- -log(selected_terms$P.value)
+selected_terms$logp <- ifelse(selected_terms$logp > max_p, max_p, selected_terms$logp)
+
+# remove GO Term ID
+selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
+
+selected_terms <- selected_terms %>%
+  arrange(group)
+
+
+selected_terms$wrap <- wrapText(selected_terms$Term, 50)
+
+selected_terms$Term <- factor(
+  as.character(selected_terms$Term),
+  levels = rev(unique(as.character(selected_terms$Term)))
+)
+
+# GO Term dot plot
+
+p <- selected_terms %>%
+  ggplot(aes(x = group, y = Term, color =logp, size=log(Combined.Score))) +
+  geom_point() +
+  scale_color_stepsn(colors=rev(magma(256))) +
+  RotatedAxis() + xlab('') + ylab('') +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.border = element_rect(size=1, color='black', fill=NA),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.margin = margin(0,0,0,0),
+    panel.grid = element_line(size=0.25, color='lightgrey')
+  )
+
+
+
+
+pdf(paste0(fig_dir, 'NMF_selected_GO_terms.pdf'), width=12, height=12)
+p
+dev.off()
+
+
+
+
+
+plot_list <- list()
+for(cur_mod in unique(selected_terms$module)){
+  plot_df <- selected_terms %>% subset(module == cur_mod)
+
+  # which cell type was this module highest in?
+  cur_color <- mod_df %>% subset(module == cur_mod) %>% .$color
+
+  p <- plot_df  %>%
+    ggplot(aes(x=log(Combined.Score), y=reorder(Term, Combined.Score), fill=module))+
+    geom_bar(stat='identity', position='identity', color='white', fill=cur_color) +
+    geom_text(aes(label=Term), x=.1, color='black', size=3.5, hjust='left') +
+  #  scale_fill_manual(values=cp) +
+    ylab('Term') + xlab('log(Enrichment)') +
+    scale_x_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    theme(
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      legend.title = element_blank(),
+      axis.ticks.y=element_blank(),
+      axis.text.y=element_blank(),
+      axis.line.y=element_blank(),
+      plot.title = element_text(hjust = 0.5, face='bold')
+    ) + NoLegend() + ggtitle(paste0("Module ", cur_mod))
+  plot_list[[cur_mod]] <- p
+}
+
+
+pdf(paste0(fig_dir, 'NMF_selected_GO_terms_bar.pdf'), width= 4, height=4 , useDingbats=FALSE)
+for(p in plot_list){
+  print(p)
+}
+dev.off()
+
+
+```
+
+LSI analysis for "module eigenhancers"
+no idea if this works hahaha
+
+```{r eval=FALSE}
+
+cur_mod <- '13'
+cur_peaks <- subset(modules, module == cur_mod) %>% .$peak %>% unique
+
+# subset seurat object to just have ODCs
+# cur_seurat <- subset(seurat_obj, celltype == 'ODC')
+cur_seurat <- seurat_obj
+
+# get the accessibility matrix:
+X <- GetAssayData(cur_seurat, slot='counts', assay = 'peaks')[cur_peaks,]
+
+# compute variance for each row:
+rowvars <- sparseMatrixStats::rowVars(X)
+rowmeans <- Matrix::rowSums(X) / ncol(X)
+
+# compute FANOfactor
+fano <- rowvars / rowmeans
+
+# remove thee genes where mean was 0
+fano <- fano[!is.nan(fano)]
+
+# sort
+fano <- fano[rev(order(fano))]
+
+# get top 250 genes
+selected_peaks <- names(fano[1:250])
+
+cur_seurat <- ScaleData(cur_seurat, features=selected_peaks)
+X_scaled <- GetAssayData(cur_seurat, slot='scale.data', assay = 'peaks')
+avg_scaled <- Matrix::colSums(X_scaled) / nrow(X_scaled)
+
+cur_ME <- RunPCA(
+  cur_seurat,
+  features = selected_peaks,
+  reduction.key = 'ME_'
+)@reductions$pca
+
+
+cur_ME <- RunSVD(
+  cur_seurat,
+  features = cur_peaks,
+  reduction.key = 'ME_'
+)@reductions$lsi
+
+
+# correlation of depth & MEs
+ME <- cur_ME@cell.embeddings
+depth <- cur_seurat$nCount_peaks
+
+cor(ME[,1], avg_scaled)
+
+cor(ME[,1], depth)
+cor(ME[,2], depth)
+cor(ME[,3], depth)
+
+cur_seurat$ME_score <- ME[,1]
+
+p <- VlnPlot(cur_seurat, features='ME_score', group.by = 'Dataset', split.by = 'Diagnosis', pt.size=0)
+pdf(paste0(fig_dir, 'test_ME_vln.pdf'), width= 4, height=4 , useDingbats=FALSE)
+p
+dev.off()
+
+
+cur_seurat$ME_score <- ME[,2]
+
+p <- VlnPlot(cur_seurat, features='ME_score', group.by = 'celltype', split.by = 'Diagnosis', pt.size=0)
+pdf(paste0(fig_dir, 'test_ME_vln.pdf'), width= 8, height=4 , useDingbats=FALSE)
+p
+dev.off()
+
+```
+
+TF-gene network
+
+* need a table that has peak, TF, target gene, enhancer/promoter, coaccessibility, and footprint binding score
+
+```{r eval=FALSE}
+
+
+####################################################################
+# load footprint data & enhancer-gene maps
+####################################################################
+
+cur_celltype <- 'INH'
+
+tfbs_ad <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_AD.csv'))
+tfbs_pid <- read.csv(file=paste0(data_dir, 'combined_footprints_', cur_celltype, '_PiD.csv'))
+
+# add column for the tfbs coords
+tfbs_ad$TFBS_coords <- paste0(tfbs_ad$TFBS_chr, '-', tfbs_ad$TFBS_start, '-', tfbs_ad$TFBS_end)
+tfbs_pid$TFBS_coords <- paste0(tfbs_pid$TFBS_chr, '-', tfbs_pid$TFBS_start, '-', tfbs_pid$TFBS_end)
+
+# add column for the peak coords
+tfbs_ad$peak_coords <- paste0(tfbs_ad$peak_chr, '-', tfbs_ad$peak_start, '-', tfbs_ad$peak_end)
+tfbs_pid$peak_coords <- paste0(tfbs_pid$peak_chr, '-', tfbs_pid$peak_start, '-', tfbs_pid$peak_end)
+
+# load enhancer-gene maps
+map_AD <- read.csv(file=paste0(data_dir, 'enhancer_gene_map_combined_AD.csv'))
+map_PiD <- read.csv(file=paste0(data_dir, 'enhancer_gene_map_combined_PiD.csv'))
+
+map_AD$Study <- 'AD'; map_PiD$Study <- 'PiD'
+map_both <- rbind(map_AD, map_PiD)
+
+map_both$plot_condition <- ifelse(
+  map_both$condition == 'Control' & map_both$Study == 'AD',
+  'Control (AD)', ifelse(
+    map_both$condition == 'Control' & map_both$Study == 'PiD',
+    'Control (PiD)', map_both$condition
+  )
+)
+map_both$plot_condition <- factor(
+  as.character(map_both$plot_condition),
+  levels = c('Control (AD)', 'AD', 'Control (PiD)', 'PiD')
+)
+
+
+####################################################################
+# load snRNA-seq data to get a list of expressed genes
+####################################################################
+
+# load integrated AD dataset and subset by current cell type
+seurat_AD <- readRDS(file="/dfs7/swaruplab/smorabit/analysis/ADDS_2021/splitseq/integration/data/AD_integrated.rds" )
+cur_RNA <- subset(seurat_AD, cell_type == cur_celltype)
+
+# get
+cur_RNA <- SetupForWGCNA(
+  cur_RNA,
+  gene_select = "fraction",
+  fraction = 0.25,
+  group.by = 'Study',
+  wgcna_name = "INH"
+)
+length(GetWGCNAGenes(cur_RNA))
+expressed_genes <- GetWGCNAGenes(cur_RNA)
+
+####################################################################
+# select enhancer-gene map for current celltype & condition
+####################################################################
+
+cur_dataset <- 'AD'
+cur_dataset <- 'PiD'
+
+if(cur_dataset == 'AD'){
+  cur_map <- subset(map_AD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_ad
+} else{
+  cur_map <- subset(map_PiD, celltype == cur_celltype & Peak2_type != 'Exonic')
+  tfbs_df <- tfbs_pid
+}
+
+
+# list of TFs
+tfs <- unique(tfbs_df$TFBS_name)
+
+# convert name to human style, and only keep TFs that we have in our peakset
+tf_genes <- do.call(rbind, strsplit(tfs, '_'))[,1] %>% str_to_upper()
+tf_genes[!(tf_genes %in% peaks$nearestGene)] # tfs that we don't have gene info for in our peaks
+names(tf_genes) <- tfs
+ix <- match(tfbs_df$TFBS_name, tfs)
+tfbs_df$TFBS_gene_name <- tf_genes[ix]
+tfbs_df <- subset(tfbs_df, TFBS_gene_name %in% peaks$nearestGene)
+
+# list of valid peaks
+promoter_peaks <- peaks %>% subset(peakType == 'Promoter') %>% .$peak
+enhancer_peaks <- cur_map %>% subset(Peak2_type != 'Exonic') %>% .$Peak2 %>% unique
+valid_peaks <- c(promoter_peaks, enhancer_peaks)
+
+# add the peakType to the tfbs_df
+ix <- match(tfbs_df$peak_coords, peaks$peak)
+tfbs_df$peakType <- peaks$peakType[ix]
+
+# only keep valid peaks
+tfbs_df <- subset(tfbs_df, peak_coords %in% valid_peaks)
+
+# get the target gene as the nearest gene for the promoters:
+tfbs_promoter <- subset(tfbs_df, peakType == 'Promoter')
+tfbs_enhancer <- subset(tfbs_df, peakType != 'Promoter')
+
+# get TFs that are in linked enhancers
+cur_map$peak_coords <- cur_map$Peak2
+tfbs_enhancer <- left_join(tfbs_enhancer, cur_map, by='peak_coords')
+tfbs_enhancer$target_gene <- tfbs_enhancer$Peak1_nearestGene
+tfbs_enhancer$bs_type <- 'Enhancer'
+all(tfbs_enhancer$peak_coords %in% cur_map$peak_coords)
+all(cur_map$peak_coords %in% tfbs_enhancer$peak_coords)
+
+# get TFs that are in promoter regions
+ix <- match(tfbs_promoter$peak_coords, peaks$peak)
+tfbs_promoter$target_gene <- peaks$nearestGene[ix]
+tfbs_promoter$coaccess <- 1
+tfbs_promoter$bs_type <- 'Promoter'
+
+# put together the promoter & enhancer tables
+cols_keep <- c(colnames(tfbs_df), 'target_gene', 'coaccess', 'bs_type')
+tfbs_combined <- rbind(tfbs_promoter[,cols_keep], tfbs_enhancer[,cols_keep])
+
+################################################################################
+# put together adjacency matrix:
+# only consider where there's a bound tf
+#
+# Should I only include genes that are expressed in the current cell type?
+################################################################################
+
+adj_df <- tfbs_combined %>% subset(dx_bound == 1) %>% dplyr::select(c(TFBS_gene_name, target_gene))
+colnames(adj_df) <- c('source', 'target')
+
+# set factor levels for source and targets
+tf_levels <- unique(c(adj_df$source, adj_df$target))
+adj_df$source <- factor(as.character(adj_df$source), levels=tf_levels)
+adj_df$target <- factor(as.character(adj_df$target), levels=tf_levels)
+
+# compute adjacenty matrix by counting links
+adj_df <- data.table(adj_df)
+adj_mat <- table(adj_df[,lapply(.SD, factor, tf_levels)])
+
+
+################################################################################
+# TF UMAP
+################################################################################
+
+valid_tfs <- unique(as.character(adj_df$source))
+valid_genes <- expressed_genes[expressed_genes %in% adj_df$target]
+valid_genes <- unique(c(as.character(valid_tfs), valid_genes))
+all(valid_genes %in% rownames(adj_mat))
+
+# set up feature matrix for UMAP
+feature_mat <- t(adj_mat[valid_tfs,valid_genes])
+feature_mat <- feature_mat[rowSums(feature_mat) > 0,]
+quantile(rowSums(feature_mat))
+
+# set up tf-tf matrix for umap
+# feature_mat <- t(adj_mat[valid_tfs,valid_tfs])
+# feature_mat <- feature_mat[rowSums(feature_mat) > 0,]
+# quantile(rowSums(feature_mat))
+
+dim(feature_mat)
+tf_umap <-  uwot::umap(
+  X = feature_mat,
+  min_dist = 0.01,
+  n_neighbors= 5,
+  metric = "cosine",
+  spread=1
+#  y = modules$module, # for supervised UMAP
+)
+tf_umap <- as.data.frame(tf_umap)
+colnames(tf_umap) <- c("UMAP1", "UMAP2")
+tf_umap$gene <- rownames(tf_umap)
+
+tf_umap$conns <- rowSums(feature_mat)
+
+p <- ggplot(tf_umap, aes(x=UMAP1, y=UMAP2, color=log(conns))) +
+  geom_point() +
+  scale_color_gradientn(colors=rev(inferno(256))) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'test_tf_umap.pdf'), width=10, height=10)
+p
+dev.off()
+
+################################################################################
+# irlba + umap
+################################################################################
+
+# set up feature matrix for UMAP
+feature_mat <- t(adj_mat[valid_tfs,valid_genes])
+feature_mat <- feature_mat[rowSums(feature_mat) > 0,]
+quantile(rowSums(feature_mat))
+
+pcs <- irlba::prcomp_irlba(
+  feature_mat, n=10
+)
+summary(pcs)
+dim(pcs$x)
+
+
+tf_umap <-  uwot::umap(
+  X = pcs$x,
+  min_dist = 0.1,
+  n_neighbors= 20,
+  metric = "cosine",
+  spread=1
+#  y = modules$module, # for supervised UMAP
+)
+tf_umap <- as.data.frame(tf_umap)
+colnames(tf_umap) <- c("UMAP1", "UMAP2")
+tf_umap$gene <- rownames(tf_umap)
+
+tf_umap$conns <- rowSums(feature_mat)
+
+p <- ggplot(tf_umap, aes(x=UMAP1, y=UMAP2, color=log(conns))) +
+  geom_point() +
+  scale_color_gradientn(colors=rev(inferno(256))) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'test_tf_umap.pdf'), width=10, height=10)
+p
+dev.off()
+
+
+################################################################################
+# spectral embedding
+################################################################################
+
+library(igraph)
+
+feature_mat <- t(adj_mat[valid_tfs,valid_tfs])
+
+g <- graph_from_adjacency_matrix(feature_mat)
+
+spectral <- igraph::embed_laplacian_matrix(
+  g, no=2
+)
+
+tf_umap <- as.data.frame(spectral$X)
+colnames(tf_umap) <- c("UMAP1", "UMAP2")
+tf_umap$gene <- rownames(tf_umap)
+
+tf_umap$conns <- rowSums(feature_mat)
+
+p <- ggplot(tf_umap, aes(x=UMAP1, y=UMAP2, color=log(conns))) +
+  geom_point() +
+  scale_color_gradientn(colors=rev(inferno(256))) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'test_tf_umap.pdf'), width=10, height=10)
+p
+dev.off()
+
+```

@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=cellranger-atac     ## Name of the job.
+#SBATCH -p standard          ## partition/queue name
+#SBATCH -A vswarup_lab           ## partition/queue name
+#SBATCH --nodes=1            ## (-N) number of nodes to use
+#SBATCH --ntasks=1          ## (-n) number of tasks to launch
+#SBATCH --cpus-per-task=32    ## number of cores the job needs
+#SBATCH --error=slurm-%J.err ## error log file
+#SBATCH --mem 128G              ## request 64GB of memory
+#SBATCH --array=0-23
+
+# path to my own version of cellranger-atac
+cellranger_path="/data/homezvol1/smorabit/swaruplab/smorabit/bin/software/cellranger-atac/2.0.0/cellranger-atac"
+
+# annotation
+annotation="/data/homezvol1/smorabit/swaruplab/smorabit/resources/cellranger-atac_reference/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/"
+
+# samples
+sampledir="/data/homezvol1/smorabit/swaruplab/smorabit/data/PiD_2021/fastqs/"
+fastqs=($(ls $sampledir/))
+
+# index is just the
+let index=$SLURM_ARRAY_TASK_ID
+sample=$(basename ${fastqs[$index]})
+echo $sample
+
+# call cellranger
+$cellranger_path count --id=$sample \
+                --fastqs=$sampledir$sample \
+                --reference=$annotation \
+                --localcores=32 \
+                --localmem=128

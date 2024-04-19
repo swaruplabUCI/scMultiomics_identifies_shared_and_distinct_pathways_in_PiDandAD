@@ -1,0 +1,727 @@
+
+
+```{r eval=FALSE}
+
+# conda activate cicero
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(GenomicRanges)
+theme_set(theme_cowplot())
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/TF_net')
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# load the PiD + AD seurat_obj object
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated.rds')
+
+# load the peaks table
+peaks <- read.csv('~/swaruplab/smorabit/analysis/PiD_2021/data/peak_table.csv')
+peaks <- GRanges(peaks)
+peaks$peak <- paste0(
+  as.character(seqnames(peaks)), '-',
+  as.character(start(peaks)), '-',
+  as.character(end(peaks))
+)
+
+# load the cell-type color scheme from the NatGen paper
+load('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/color_scheme.rda')
+load('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/color_scheme.rda')
+
+color_scheme_snATAC_celltype$EX <- 'turquoise'
+cp <- color_scheme_snATAC_celltype
+cp$Unknown <- NULL
+
+# color scheme for AD, PiD, and control
+dx_cp <- c(
+  AD = "#E87D72",
+  PiD = "#A572E8",
+  Control = "#55BCC2"
+)
+
+
+```
+
+CustomLinkPlot function
+
+```{r eval=FALSE}
+
+
+#' CustomLinkPlot
+#'
+#' Modification of the Signac LinkPlot function for extra customization
+#'
+#' @param object A Seurat object
+#' @param region Genomic region to plot
+#' @param links
+#' @param assay Selected assay in the Seurat object
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @param
+#' @keywords coaccessibility
+#' @export
+#' @examples
+#'
+CustomLinkPlot <- function(
+  object,
+  region,
+  links = NULL,
+  assay = NULL,
+  min.cutoff = 0,
+  sep = c("-", "-"),
+  extend.upstream = 0,
+  extend.downstream = 0,
+  negative=TRUE,
+  ymax = NULL,
+  color_high = 'blue',
+  color_mid = 'grey',
+  color_low = 'red'
+) {
+  region <- Signac:::FindRegion(
+    object = object,
+    region = region,
+    sep = sep,
+    assay = assay,
+    extend.upstream = extend.upstream,
+    extend.downstream = extend.downstream
+  )
+  chromosome <- seqnames(x = region)
+
+  # extract link information
+  if(is.null(links)){
+    links <- Links(object = object)
+  }
+
+  # if links not set, return NULL
+  if (length(x = links) == 0) {
+    return(NULL)
+  }
+
+  # subset to those in region
+  links.keep <- subsetByOverlaps(x = links, ranges = region)
+
+  # filter out links below threshold
+  link.df <- as.data.frame(x = links.keep)
+  link.df <- link.df[abs(x = link.df$score) > min.cutoff, ]
+
+  # remove links outside region
+  link.df <- link.df[link.df$start >= start(x = region) & link.df$end <= end(x = region), ]
+
+  # plot
+  if (nrow(x = link.df) > 0) {
+    if (!requireNamespace(package = "ggforce", quietly = TRUE)) {
+      warning("Please install ggforce to enable LinkPlot plotting: ",
+              "install.packages('ggforce')")
+      p <- ggplot(data = link.df)
+    } else {
+      # convert to format for geom_bezier
+      link.df$group <- seq_len(length.out = nrow(x = link.df))
+
+      if(negative){
+        link.df$score <- link.df$score * -1
+      }
+
+      df <- data.frame(
+        x = c(link.df$start,
+              (link.df$start + link.df$end) / 2,
+              link.df$end),
+        y = c(rep(x = 0, nrow(x = link.df)),
+              #rep(x = -1, nrow(x = link.df)),
+              2*link.df$score,
+              rep(x = 0, nrow(x = link.df))),
+        type = rep('cubic', nrow(link.df)),
+        group = rep(x = link.df$group, 3),
+        score = rep(link.df$score, 3)
+      )
+
+      df$alp <- abs(df$score)
+
+
+      # sort by the score
+      # if(negative){
+      # #  df <- df %>% arrange(desc(score))
+      #   df <- df %>% arrange(score)
+      # } else{
+      #   df <- df %>% arrange(score)
+      # }
+      if(!negative){
+        df$group <- factor(df$group, levels=unique(df$group[order(df$score)]))
+      }else{
+        df$group <- factor(df$group, levels=unique(df$group[rev(order(df$score))]))
+      }
+
+
+      min.color <- min(0, min(df$score))
+      print(range(df$score))
+      print(min.color)
+      p <- ggplot(data = df) +
+        ggforce::geom_bezier(
+          mapping = aes_string(
+            x = "x", y = "y",
+            group = "group",
+            color = "score", alpha="alp",
+            linetype = 'type'
+          )
+        ) +
+        geom_hline(yintercept = 0, color = 'grey') +
+        scale_color_gradient2(low = color_low, mid = color_mid, high = color_high,
+                              #limits = c(min.color, ymax),
+                              n.breaks = 3)
+
+    }
+  } else {
+    p <- ggplot(data = link.df)
+  }
+  p <- p +
+    theme_classic() +
+    # theme(axis.ticks.y = element_blank(),
+    #       axis.text.y = element_blank()) +
+    ylab("Links") +
+    xlab(label = paste0(chromosome, " position (bp)")) +
+    xlim(c(start(x = region), end(x = region)))
+  return(p)
+}
+
+
+
+```
+
+In the following block of code, we load the enhancer-gene links for a selected
+cell type for control and disease from the PiD and AD datasets, and we show how
+to make a customized LinkPlot.
+
+```{r eval=FALSE}
+
+################################################################################
+# Part 0: Select a given cell type
+################################################################################
+
+cur_celltype <- 'ASC'
+
+# subset seurat object by celltype, and split by AD & PiD
+seurat_celltype <- subset(seurat_obj, celltype == cur_celltype)
+seurat_ct_ad <- subset(seurat_celltype, Dataset == 'AD')
+seurat_ct_pid <- subset(seurat_celltype, Dataset == 'PiD')
+
+# set factor levels for Diagnosis
+seurat_ct_ad$Diagnosis <- factor(as.character(seurat_ct_ad$Diagnosis), levels=c('AD', 'Control'))
+seurat_ct_pid$Diagnosis <- factor(as.character(seurat_ct_pid$Diagnosis), levels=c('PiD', 'Control'))
+
+
+################################################################################
+# Part 1: Load enhancer-gene links
+################################################################################
+
+# ---------------
+# AD dataset
+# ---------------
+
+# load disease and control links from AD dataset
+link_df_ad <- read.csv(file=paste0(data_dir, cur_celltype, '_AD_full_link_table_AD.csv')) %>% subset(Peak2_type != 'Exonic')
+link_df_ad_cnt <- read.csv(file=paste0(data_dir, cur_celltype, '_Control_full_link_table_AD.csv')) %>% subset(Peak2_type != 'Exonic')
+
+# add column for the two peaks
+link_df_ad$link <- paste0(link_df_ad$Peak1, '_', link_df_ad$Peak2)
+link_df_ad_cnt$link <- paste0(link_df_ad_cnt$Peak1, '_', link_df_ad_cnt$Peak2)
+
+# add missing links to each
+missing_ad <- link_df_ad_cnt$link[!(link_df_ad_cnt$link %in% link_df_ad$link)]
+missing_cnt <- link_df_ad$link[!(link_df_ad$link %in% link_df_ad_cnt$link)]
+link_df_ad[missing_ad,] <- NA
+link_df_ad[missing_ad,'link'] <- missing_ad
+link_df_ad[missing_ad,'coaccess'] <- 0
+link_df_ad_cnt[missing_cnt,] <- NA
+link_df_ad_cnt[missing_cnt,'link'] <- missing_cnt
+link_df_ad_cnt[missing_cnt,'coaccess'] <- 0
+
+# set rownames
+rownames(link_df_ad) <- link_df_ad$link
+rownames(link_df_ad_cnt) <- link_df_ad_cnt$link
+
+# re-order so they match
+link_df_ad <- link_df_ad[link_df_ad_cnt$link,]
+all.equal(link_df_ad$link, link_df_ad_cnt$link)
+
+# compute the delta
+link_df_ad$delta <- link_df_ad$coaccess - link_df_ad_cnt$coaccess
+
+# make a table containing co-accessibility info for both disease and control
+plot_df <- data.frame(
+  link = link_df_ad$link,
+  coaccess_dx = link_df_ad$coaccess,
+  coaccess_cnt = link_df_ad_cnt$coaccess
+)
+plot_df$Peak1 <- ifelse(is.na(link_df_ad$Peak1), link_df_ad_cnt$Peak1, link_df_ad$Peak1)
+plot_df$Peak1_nearestGene <- ifelse(is.na(link_df_ad$Peak1_nearestGene), link_df_ad_cnt$Peak1_nearestGene, link_df_ad$Peak1_nearestGene)
+plot_df$Peak2 <- ifelse(is.na(link_df_ad$Peak2), link_df_ad_cnt$Peak2, link_df_ad$Peak2)
+plot_df$Peak2_type <- ifelse(is.na(link_df_ad$Peak2_type), link_df_ad_cnt$Peak2_type, link_df_ad$Peak2_type)
+
+# make a table that has the AD & Control co-access scores
+link_df <- plot_df
+link_df$chr <- do.call(rbind, strsplit(link_df$Peak1, '-'))[,1]
+
+# compute Disease - control delta:
+link_df$delta <- link_df$coaccess_dx - link_df$coaccess_cnt
+
+# distance between peak and target gene
+peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+peak1_ranges$Peak <- link_df$Peak1
+peak2_ranges$Peak <- link_df$Peak2
+
+# re-name
+link_df_ad <- link_df
+peak1_ranges_ad <- peak1_ranges
+peak2_ranges_ad <- peak2_ranges
+
+
+# ---------------
+# PiD dataset
+# ---------------
+
+# load disease and control links from PiD dataset
+link_df_pid <- read.csv(file=paste0(data_dir, cur_celltype, '_PiD_full_link_table.csv')) %>% subset(Peak2_type != 'Exonic')
+link_df_pid_cnt <- read.csv(file=paste0(data_dir, cur_celltype, '_Control_full_link_table.csv')) %>% subset(Peak2_type != 'Exonic')
+
+link_df_pid$link <- paste0(link_df_pid$Peak1, '_', link_df_pid$Peak2)
+link_df_pid_cnt$link <- paste0(link_df_pid_cnt$Peak1, '_', link_df_pid_cnt$Peak2)
+
+# add missing links to each
+missing_pid <- link_df_pid_cnt$link[!(link_df_pid_cnt$link %in% link_df_pid$link)]
+missing_cnt <- link_df_pid$link[!(link_df_pid$link %in% link_df_pid_cnt$link)]
+link_df_pid[missing_pid,] <- NA
+link_df_pid[missing_pid,'link'] <- missing_pid
+link_df_pid[missing_pid,'coaccess'] <- 0
+link_df_pid_cnt[missing_cnt,] <- NA
+link_df_pid_cnt[missing_cnt,'link'] <- missing_cnt
+link_df_pid_cnt[missing_cnt,'coaccess'] <- 0
+
+# set rownames
+rownames(link_df_pid) <- link_df_pid$link
+rownames(link_df_pid_cnt) <- link_df_pid_cnt$link
+
+# re-order so they match
+link_df_pid <- link_df_pid[link_df_pid_cnt$link,]
+all.equal(link_df_pid$link, link_df_pid_cnt$link)
+
+# compute the delta
+link_df_pid$delta <- link_df_pid$coaccess - link_df_pid_cnt$coaccess
+
+plot_df <- data.frame(
+  link = link_df_pid$link,
+  coaccess_dx = link_df_pid$coaccess,
+  coaccess_cnt = link_df_pid_cnt$coaccess
+)
+plot_df$Peak1 <- ifelse(is.na(link_df_pid$Peak1), link_df_pid_cnt$Peak1, link_df_pid$Peak1)
+plot_df$Peak1_nearestGene <- ifelse(is.na(link_df_pid$Peak1_nearestGene), link_df_pid_cnt$Peak1_nearestGene, link_df_pid$Peak1_nearestGene)
+plot_df$Peak2 <- ifelse(is.na(link_df_pid$Peak2), link_df_pid_cnt$Peak2, link_df_pid$Peak2)
+plot_df$Peak2_type <- ifelse(is.na(link_df_pid$Peak2_type), link_df_pid_cnt$Peak2_type, link_df_pid$Peak2_type)
+
+# make a table that has the PiD & Control co-access scores
+link_df <- plot_df
+link_df$chr <- do.call(rbind, strsplit(link_df$Peak1, '-'))[,1]
+
+# compute Disease - control delta:
+link_df$delta <- link_df$coaccess_dx - link_df$coaccess_cnt
+
+# distance between peak and target gene
+peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c('-', '-'))
+peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c('-', '-'))
+peak1_ranges$Peak <- link_df$Peak1
+peak2_ranges$Peak <- link_df$Peak2
+
+# re-name
+link_df_pid <- link_df
+peak1_ranges_pid <- peak1_ranges
+peak2_ranges_pid <- peak2_ranges
+
+
+```
+
+
+Example 1: Custom link plots with the disease - control delta score
+
+```{r eval=FALSE}
+
+# selected gene
+cur_gene <- 'APOE'
+
+# number of basepairs to add to either side of the plotting region
+buffer_bp <- 500
+
+######################################################
+# make link plot for AD dataset
+######################################################
+
+# get links to the gene of interest:
+# rename the delta as coaccess
+plot_conns <- subset(link_df_ad, Peak1_nearestGene == cur_gene) %>%
+  dplyr::select(c(Peak1, Peak2, delta)) %>%
+  dplyr::rename(c(coaccess=delta))
+
+# specify if it's higher in AD or Control
+plot_conns$direction <- sign(plot_conns$coaccess)
+plot_conns$direction <- ifelse(plot_conns$direction == -1, 'Control', 'AD')
+plot_conns$coaccess <- abs(plot_conns$coaccess)
+
+# get the plotting region based on selected links
+cur_peak1 <- subset(peak1_ranges, Peak %in% plot_conns$Peak1)
+cur_peak2 <- subset(peak2_ranges, Peak %in% plot_conns$Peak2)
+cur_peaks <- c(cur_peak1, cur_peak2)
+cur_start <- min(start(cur_peaks)) - buffer_bp
+cur_end <- max(end(cur_peaks)) + buffer_bp
+cur_chr <- as.character(unique(seqnames(cur_peaks)))
+plot_region <- paste0(cur_chr, '-', cur_start, '-', cur_end)
+
+# format the connections as GRanges
+plot_links_ad <- Signac::ConnectionsToLinks(
+  conns= subset(plot_conns, direction=='AD')
+)
+plot_links_control <- Signac::ConnectionsToLinks(
+  conns= subset(plot_conns, direction=='Control')
+)
+
+# make coverage plot
+p1 <- CoveragePlot(
+  object = seurat_ct_ad,
+  group.by='Diagnosis',
+  region = plot_region,
+  annotation = FALSE, peaks = FALSE, tile = FALSE, links = FALSE
+)
+p1 <- p1 + scale_fill_manual(values=c(dx_cp['AD'], dx_cp['Control'])) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# make annotation plot
+p2 <- AnnotationPlot(seurat_ct_ad, region=plot_region) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the AD links
+p_ad <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_ad,
+  negative = FALSE, # whether to plot it upside down or not
+  color_low = dx_cp['Control'],
+  color_mid = 'lightgrey',
+  color_high = dx_cp['AD'],
+  min.cutoff=0.05 # threshold for plotting
+) + NoLegend() + ylab('AD links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the control links
+p_control <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_control,
+  negative = TRUE,
+  min.cutoff=0.05, # threshold for plotting
+  ymax = NULL,
+  color_high = dx_cp['AD'],
+  color_mid = 'lightgrey',
+  color_low = dx_cp['Control'],
+) + NoLegend() + ylab('Control links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+
+
+# combine the different plots tog
+p3 <- CombineTracks(
+  plotlist=list(p_ad, p1,p_control, p2),
+  heights=c(2,4,2,2)
+)
+
+# plot cicero connections only, no peaks!
+pdf(paste0(fig_dir,"test_customlink.pdf"), width=9, height=6)
+p3
+dev.off()
+
+
+######################################################
+# make link plot for PiD dataset
+######################################################
+
+# get links to the gene of interest:
+# rename the delta as coaccess
+plot_conns <- subset(link_df_pid, Peak1_nearestGene == cur_gene) %>%
+  dplyr::select(c(Peak1, Peak2, delta)) %>%
+  dplyr::rename(c(coaccess=delta))
+
+# specify if it's higher in PiD or Control
+plot_conns$direction <- sign(plot_conns$coaccess)
+plot_conns$direction <- ifelse(plot_conns$direction == -1, 'Control', 'PiD')
+plot_conns$coaccess <- abs(plot_conns$coaccess)
+
+# get the plotting region based on selected links
+cur_peak1 <- subset(peak1_ranges, Peak %in% plot_conns$Peak1)
+cur_peak2 <- subset(peak2_ranges, Peak %in% plot_conns$Peak2)
+cur_peaks <- c(cur_peak1, cur_peak2)
+cur_start <- min(start(cur_peaks)) - buffer_bp
+cur_end <- max(end(cur_peaks)) + buffer_bp
+cur_chr <- as.character(unique(seqnames(cur_peaks)))
+plot_region <- paste0(cur_chr, '-', cur_start, '-', cur_end)
+
+# format the connections as GRanges
+plot_links_pid <- Signac::ConnectionsToLinks(
+  conns= subset(plot_conns, direction=='PiD')
+)
+plot_links_control <- Signac::ConnectionsToLinks(
+  conns= subset(plot_conns, direction=='Control')
+)
+
+# make coverage plot
+p1 <- CoveragePlot(
+  object = seurat_ct_pid,
+  group.by='Diagnosis',
+  region = plot_region,
+  annotation = FALSE, peaks = FALSE, tile = FALSE, links = FALSE
+)
+p1 <- p1 + scale_fill_manual(values=c(dx_cp['PiD'], dx_cp['Control'])) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# make annotation plot
+p2 <- AnnotationPlot(seurat_ct_pid, region=plot_region) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the pid links
+p_pid <- CustomLinkPlot(
+  seurat_ct_pid,
+  region = plot_region,
+  links = plot_links_pid,
+  negative = FALSE, # whether to plot it upside down or not
+  color_low = dx_cp['Control'],
+  color_mid = 'lightgrey',
+  color_high = dx_cp['PiD'],
+  min.cutoff=0.05 # threshold for plotting
+) + NoLegend() + ylab('PiD links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the control links
+p_control <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_control,
+  negative = TRUE,
+  min.cutoff=0.05, # threshold for plotting
+  ymax = NULL,
+  color_high = dx_cp['PiD'],
+  color_mid = 'lightgrey',
+  color_low = dx_cp['Control'],
+) + NoLegend() + ylab('Control links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+
+
+# combine the different plots tog
+p4 <- CombineTracks(
+  plotlist=list(p_pid, p1,p_control, p2),
+  heights=c(2,4,2,2)
+)
+
+# plot cicero connections only, no peaks!
+pdf(paste0(fig_dir,"test_customlink_pid.pdf"), width=9, height=6)
+p3 | p4
+dev.off()
+
+```
+
+Example 2: Custom link plots using the coaccessibility score
+
+```{r eval=FALSE}
+
+
+# selected gene
+cur_gene <- 'APOE'
+
+# number of basepairs to add to either side of the plotting region
+buffer_bp <- 500
+
+######################################################
+# make link plot for AD dataset
+######################################################
+
+# get links to the gene of interest:
+plot_conns_ad <- subset(link_df_ad, Peak1_nearestGene == cur_gene) %>%
+  dplyr::select(c(Peak1, Peak2, coaccess_dx)) %>%
+  dplyr::rename(c(coaccess=coaccess_dx))
+
+plot_conns_cnt <- subset(link_df_ad, Peak1_nearestGene == cur_gene) %>%
+  dplyr::select(c(Peak1, Peak2, coaccess_cnt)) %>%
+  dplyr::rename(c(coaccess=coaccess_cnt))
+
+# get the plotting region based on selected links
+cur_peak1 <- subset(peak1_ranges, Peak %in% plot_conns_ad$Peak1)
+cur_peak2 <- subset(peak2_ranges, Peak %in% plot_conns_ad$Peak2)
+cur_peaks <- c(cur_peak1, cur_peak2)
+cur_start <- min(start(cur_peaks)) - buffer_bp
+cur_end <- max(end(cur_peaks)) + buffer_bp
+cur_chr <- as.character(unique(seqnames(cur_peaks)))
+plot_region <- paste0(cur_chr, '-', cur_start, '-', cur_end)
+
+# format the connections as GRanges
+plot_links_ad <- Signac::ConnectionsToLinks(
+  conns= plot_conns_ad
+)
+plot_links_control <- Signac::ConnectionsToLinks(
+  conns= plot_conns_cnt
+)
+
+# make coverage plot
+p1 <- CoveragePlot(
+  object = seurat_ct_ad,
+  group.by='Diagnosis',
+  region = plot_region,
+  annotation = FALSE, peaks = FALSE, tile = FALSE, links = FALSE
+)
+p1 <- p1 + scale_fill_manual(values=c(dx_cp['AD'], dx_cp['Control'])) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# make annotation plot
+p2 <- AnnotationPlot(seurat_ct_ad, region=plot_region) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the AD links
+p_ad <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_ad,
+  negative = FALSE, # whether to plot it upside down or not
+  color_low = dx_cp['Control'],
+  color_mid = 'lightgrey',
+  color_high = dx_cp['AD'],
+  min.cutoff=0.05 # threshold for plotting
+) + NoLegend() + ylab('AD links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the control links
+p_control <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_control,
+  negative = TRUE,
+  min.cutoff=0.05, # threshold for plotting
+  ymax = NULL,
+  color_high = dx_cp['AD'],
+  color_mid = 'lightgrey',
+  color_low = dx_cp['Control'],
+) + NoLegend() + ylab('Control links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+
+
+# combine the different plots tog
+p3 <- CombineTracks(
+  plotlist=list(p_ad, p1,p_control, p2),
+  heights=c(2,4,2,2)
+)
+
+# plot cicero connections only, no peaks!
+pdf(paste0(fig_dir,"test_customlink_coaccess.pdf"), width=9, height=6)
+p3
+dev.off()
+
+```
+
+
+Example 3: Custom link plots using the coaccessibility score and all links in a
+specified region
+
+```{r eval=FALSE}
+
+
+# selected gene
+cur_gene <- 'APOE'
+
+# number of basepairs to add to either side of the plotting region
+buffer_bp <- 500
+
+######################################################
+# make link plot for AD dataset
+######################################################
+
+plot_conns_ad <- link_df_ad %>%
+  dplyr::select(c(Peak1, Peak2, coaccess_dx)) %>%
+  dplyr::rename(c(coaccess=coaccess_dx))
+
+plot_conns_cnt <- link_df_ad %>%
+  dplyr::select(c(Peak1, Peak2, coaccess_cnt)) %>%
+  dplyr::rename(c(coaccess=coaccess_cnt))
+
+# get the plotting region based on selected links
+cur_peak1 <- subset(peak1_ranges, Peak %in% plot_conns_ad$Peak1)
+cur_peak2 <- subset(peak2_ranges, Peak %in% plot_conns_ad$Peak2)
+cur_peaks <- c(cur_peak1, cur_peak2)
+cur_start <- min(start(cur_peaks)) - buffer_bp
+cur_end <- max(end(cur_peaks)) + buffer_bp
+cur_chr <- as.character(unique(seqnames(cur_peaks)))
+plot_region <- paste0(cur_chr, '-', cur_start, '-', cur_end)
+
+# format the connections as GRanges
+plot_links_ad <- Signac::ConnectionsToLinks(
+  conns= plot_conns_ad
+)
+plot_links_control <- Signac::ConnectionsToLinks(
+  conns= plot_conns_cnt
+)
+
+# make coverage plot
+p1 <- CoveragePlot(
+  object = seurat_ct_ad,
+  group.by='Diagnosis',
+  region = plot_region,
+  annotation = FALSE, peaks = FALSE, tile = FALSE, links = FALSE
+)
+p1 <- p1 + scale_fill_manual(values=c(dx_cp['AD'], dx_cp['Control'])) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# make annotation plot
+p2 <- AnnotationPlot(seurat_ct_ad, region=plot_region) +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the AD links
+p_ad <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_ad,
+  negative = FALSE, # whether to plot it upside down or not
+  color_low = dx_cp['Control'],
+  color_mid = 'lightgrey',
+  color_high = dx_cp['AD'],
+  min.cutoff=0.05 # threshold for plotting
+) + NoLegend() + ylab('AD links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+# run the custom link plot for the control links
+p_control <- CustomLinkPlot(
+  seurat_ct_ad,
+  region = plot_region,
+  links = plot_links_control,
+  negative = TRUE,
+  min.cutoff=0.05, # threshold for plotting
+  ymax = NULL,
+  color_high = dx_cp['AD'],
+  color_mid = 'lightgrey',
+  color_low = dx_cp['Control'],
+) + NoLegend() + ylab('Control links') +
+  theme(plot.margin=margin(0,0,0,0))
+
+# combine the different plots tog
+p3 <- CombineTracks(
+  plotlist=list(p_ad, p1,p_control, p2),
+  heights=c(2,4,2,2)
+)
+
+pdf(paste0(fig_dir,"test_customlink_coaccess_all_link.pdf"), width=9, height=6)
+p3
+dev.off()
+
+```

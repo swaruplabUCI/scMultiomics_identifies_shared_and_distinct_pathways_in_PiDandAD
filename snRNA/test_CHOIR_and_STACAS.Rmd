@@ -1,0 +1,168 @@
+```{r eval=FALSE}
+
+# conda activate voyager
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(ggpubr)
+library(ggrastr)
+library(patchwork)
+library(MetBrewer)
+theme_set(theme_cowplot())
+
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+# set random seed for reproducibility
+set.seed(12345)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/')
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+
+# load seurat object
+seurat_obj <- readRDS(file=paste0(data_dir, 'PiD_snRNA_seurat.rds'))
+
+```
+
+Run CHOIR clustering algorithm
+
+```{r eval=FALSE}
+
+library(CHOIR)
+
+seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures=3000)
+
+harmony <- seurat_obj@reductions$harmony@cell.embeddings
+rownames(harmony) <- colnames(seurat_obj)
+
+# using my own dim red (BAD)
+seurat_obj <- CHOIR(
+    seurat_obj, 
+    reduction = harmony,
+    var_features = VariableFeatures(seurat_obj)
+)
+
+# as suggested by them
+seurat_obj <- CHOIR(
+    seurat_obj, 
+   # batch_correction_method = "Harmony",
+   # batch_labels = "Batch"
+)
+
+stuff <- seurat_obj@misc$CHOIR$records
+save(stuff, file='data/choir_records.rda')
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'CHOIR_clusters_0.05',
+  label=FALSE,
+  raster=TRUE,
+  raster_dpi = 300,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+#  color_df = color_df
+) + ggtitle('')
+
+seurat_obj <- runCHOIRumap(seurat_obj)
+p <- plotCHOIR(seurat_obj)
+
+
+pdf(paste0(fig_dir, 'PiD_umap_CHOIR_nobatch.pdf'), width=12, height=6)
+p
+dev.off()
+
+
+p1 <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+  #color_df = color_df,
+) + ggtitle('Annotated Leiden Clusters') + NoLegend()
+
+p2 <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'CHOIR_clusters_0.05',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+  #color_df = color_df,
+) + ggtitle('CHOIR clusters') + NoLegend()
+
+pdf(paste0(fig_dir, 'PiD_umap_CHOIR_compare_labeled.pdf'), width=10, height=6)
+p1 | p2
+dev.off()
+
+seurat_obj <- CHOIR(
+    seurat_obj, 
+    batch_correction_method = 'Harmony',
+    batch_labels = 'SampleID'
+)
+
+
+p1 <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+  #color_df = color_df,
+) + ggtitle('Annotated Leiden Clusters') + NoLegend()
+
+p2 <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'CHOIR_clusters_0.05',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  plot_theme = hdWGCNA::umap_theme(),
+  #color_df = color_df,
+) + ggtitle('CHOIR clusters') + NoLegend()
+
+pdf(paste0(fig_dir, 'PiD_umap_CHOIR_compare_labeled2.pdf'), width=10, height=6)
+p1 | p2
+dev.off()
+
+seurat_obj$CHOIR_clusters_0.05 <- factor(
+    as.character(seurat_obj$CHOIR_clusters_0.05),
+    levels = as.character(1:length(unique(seurat_obj$CHOIR_clusters_0.05)))
+)
+
+# how many clusters in each cell type?
+library(ggsankey)
+
+df <- seurat_obj@meta.data %>% 
+  ggsankey::make_long(cell_type, CHOIR_clusters_0.05)
+
+
+p <- ggplot(df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node)) +
+  geom_sankey() +
+  geom_sankey_label(size=2) +
+  theme_sankey(base_size = 16) + NoLegend() +
+  #scale_fill_manual(values=mod_colors) + 
+  scale_x_discrete(labels=c('Cell Type','CHOIR')) +
+  xlab('')
+
+pdf(paste0(fig_dir, 'CHOIR_sankey.pdf'), width=6, height=6)
+p
+dev.off()
+
+
+```

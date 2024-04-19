@@ -1,0 +1,717 @@
+
+```{r eval=FALSE}
+# conda activate cicero
+library(ArchR)
+library(tidyverse)
+
+setwd('~/swaruplab/smorabit/analysis/PiD_2021/')
+
+# set archR genome
+addArchRGenome("hg38")
+addArchRThreads(threads = 32)
+
+proj <- loadArchRProject(path = "ArchR")
+
+
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+
+```
+
+# create arrow files
+
+```{r eval=FALSE}
+
+
+cellranger_dir <-  '~/swaruplab/smorabit/data/PiD_2021/cellranger/'
+sample_names <- dir(cellranger_dir)
+
+# for now exclude samples 22 since they aren't done running:
+sample_names <- sample_names[!c(sample_names %in% c('Swarup_Lab_22'))]
+sample_files <- paste0(cellranger_dir, sample_names, '/outs/fragments.tsv.gz')
+
+sample_names <- gsub('Swarup_Lab_', 'Sample', sample_names)
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = sample_files,
+  sampleNames = sample_names,
+  minTSS = 4, #Dont set this too high because you can always increase later
+  minFrags = 1000,
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+
+# ## Compute Doublet Scores:
+# doubScores <- addDoubletScores(
+#   input = ArrowFiles,
+#   k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+#   knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search.
+#   LSIMethod = 1
+# )
+#
+# # add the other arrow files from the pilot:
+# ArrowFiles <- dir('./')[grepl('.arrow', dir('./'))]
+#
+# # exclude bad samples:
+# exclude <- paste0(c('Sample_8', 'Sample_12', 'Sample_19', 'Sample_20', 'Sample_21'), '.arrow')
+# ArrowFiles <- ArrowFiles[!(ArrowFiles %in% exclude)]
+
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+
+# add sample metadata:
+sample_meta <- read.csv('~/swaruplab/smorabit/analysis/PiD_2021/data/sample_meta.csv')
+sample_meta$SampleID <- paste0('Sample_', sample_meta$SampleID)
+
+for(meta in names(sample_meta)){
+  proj@cellColData[[meta]] <- sample_meta[match(as.character(proj@cellColData$Sample), sample_meta$SampleID), meta]
+}
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+```
+
+QC cutoff:
+
+```{r eval=FALSE}
+
+proj <- loadArchRProject(path = "ArchR")
+
+which(proj$TSSEnrichment > 5 & proj$nFrags > 1500) %>% length
+
+proj@cellColData[which(proj$TSSEnrichment > 5 & proj$nFrags > 1500),] %>% .$Sample %>% table
+
+proj<- proj[which(proj$TSSEnrichment > 5 & proj$nFrags > 1500)]
+table(proj$Sample)
+nrow(proj@cellColData)
+
+```
+
+
+## Convert to Seurat/Signac format:
+
+* get the peak matrix
+* get the pseudo-expression matrix
+* get chromvar matrix
+* subset one sample only
+* create chromatin assay using that
+
+```{r eval=FALSE}
+
+# load AD dataset
+proj_AD <- loadArchRProject(path = "/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/all_samples/")
+
+add peaks from AD dataset
+proj@peakSet <- proj_AD@peakSet
+proj <- addPeakMatrix(proj)
+proj <- saveArchRProject(ArchRProj = proj)
+
+# get peak matrix
+peak_matrix <- getMatrixFromProject(proj, useMatrix='PeakMatrix')
+pm <- assays(peak_matrix)$PeakMatrix
+
+################################################################################
+# Create seurat object
+################################################################################
+
+library(Seurat)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+
+cellranger_dir <- "/dfs3b/swaruplab/smorabit/data/PiD_2021/cellranger/"
+
+# get the gene annotation for the Seurat object
+annotations <- GetGRangesFromEnsDb(ensdb =  EnsDb.Hsapiens.v86)
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "hg38"
+
+
+samples <- unique(proj@cellColData$Sample)
+samples <- samples[order(samples)]
+fragment_files <- ifelse(
+  samples %in% paste0('Sample_', 1:4),
+  gsub(' ', '_', samples),
+  gsub('Sample_', 'Swarup_Lab_', samples)
+)
+
+fragment_files <- paste0(cellranger_dir, fragment_files, '/outs/fragments.tsv.gz')
+names(fragment_files) <- samples
+
+seurat_list <- lapply(samples, function(cur_sample){
+  print(cur_sample)
+
+  #cur_sample <- 'Sample4'
+  cur_fragments <- as.character(fragment_files[cur_sample])
+
+  cur_pm <- pm[,grepl(paste0(cur_sample, '#'), colnames(pm))]
+  cur_meta <- proj@cellColData %>% as.data.frame %>% subset(Sample == cur_sample)
+
+  # change colnames:
+  colnames(cur_pm) <- do.call(rbind, str_split(colnames(cur_pm), '#'))[,2]
+  rownames(cur_meta) <- do.call(rbind, str_split(rownames(cur_meta), '#'))[,2]
+  print(dim(cur_pm))
+
+  # create chromatin assay
+  cur_chromatin <- CreateChromatinAssay(
+    counts=cur_pm,
+    sep = c('-', '-'),
+    fragments=cur_fragments,
+    ranges=proj@peakSet,
+    genome='hg38',
+    annotation = annotations
+  )
+
+  # create a new Seurat obj with only the archR peaks:
+  cur_atac <- CreateSeuratObject(
+    cur_chromatin,
+    assay='peaks',
+    meta.data = cur_meta,
+  )
+
+})
+
+# merge objects
+seurat_obj <- merge(
+  x=seurat_list[[1]], y=seurat_list[2:length(seurat_list)],
+  add.cell.ids = samples
+)
+
+rm(seurat_list, pm); gc(); pryr::mem_used()
+
+
+```
+
+
+Signac / Seurat integrateion
+
+
+```{r eval=FALSE}
+
+library(future)
+plan("multiprocess", workers = 32)
+plan("sequential")
+
+
+# load AD dataset:
+NucSeq.atac <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/data/NucSeq_macs2Peaks_signac.rds')
+# NucSeq.atac.cortex <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
+
+# cells.keep <- intersect(colnames(NucSeq.atac), colnames(NucSeq.atac.cortex))
+#
+# lsi <- NucSeq.atac.cortex@reductions$lsi@cell.embeddings
+# lsi <- lsi[colnames(NucSeq.atac),]
+#
+# NucSeq.atac@reductions$lsi <- CreateDimReducObject(
+#   embeddings=lsi,
+#   assay='peaks'
+# )
+
+################################################################################
+# Data Processing
+################################################################################
+
+# process the AD data
+NucSeq.atac<- FindTopFeatures(NucSeq.atac, min.cutoff = 10)
+NucSeq.atac<- RunTFIDF(NucSeq.atac)
+NucSeq.atac <- RunSVD(NucSeq.atac)
+saveRDS(NucSeq.atac, paste0(data_dir, 'AD_atac_seurat.rds'))
+
+# process the PiD data
+seurat_obj <- FindTopFeatures(seurat_obj, min.cutoff = 10)
+seurat_obj <- RunTFIDF(seurat_obj)
+seurat_obj <- RunSVD(seurat_obj)
+seurat_obj <- FindNeighbors(object = seurat_obj, reduction = 'lsi', dims = 2:30)
+seurat_obj <- FindClusters(seurat_obj,algorithm = 3,resolution = 1,verbose = FALSE)
+saveRDS(seurat_obj, paste0(data_dir, 'PiD_atac_seurat.rds'))
+
+# merge datasets and process
+seurat_obj$Dataset <- 'PiD'
+NucSeq.atac$Dataset <- 'AD'
+combined <- merge(seurat_obj, NucSeq.atac)
+
+# process the combined dataset
+combined <- FindTopFeatures(combined, min.cutoff = 10)
+combined <- RunTFIDF(combined)
+combined <- RunSVD(combined)
+combined <- RunUMAP(combined, reduction = "lsi", dims = 2:30)
+
+################################################################################
+# Compute integration anchors and integrate embedding
+################################################################################
+
+# find integration anchors
+integration.anchors <- FindIntegrationAnchors(
+  object.list = list(NucSeq.atac, seurat_obj),
+  anchor.features = rownames(NucSeq.atac),
+  reduction = "rlsi",
+  dims = 2:30
+)
+
+saveRDS(integration.anchors, paste0(data_dir, 'PiD_AD_integration_anchors.rds'))
+
+
+# integrate LSI embeddings
+integrated <- IntegrateEmbeddings(
+  anchorset = integration.anchors,
+  reductions = combined[["lsi"]],
+  new.reduction.name = "integrated_lsi",
+  dims.to.integrate = 1:30
+)
+
+integrated <- RunUMAP(integrated, reduction = "integrated_lsi", dims = 2:30)
+
+# move UMAP:
+seurat_obj@reductions$integrated_umap <- CreateDimReducObject(
+  embeddings = integrated@reductions$umap@cell.embeddings[colnames(seurat_obj),],
+  assay='peaks'
+)
+
+################################################################################
+# Plot Integration Results
+################################################################################
+
+integrated$Dataset <- combined$Dataset[match(colnames(combined), colnames(integrated))]
+integrated$umap_label <- ifelse(
+  integrated$Dataset == 'PiD', 'PiD', integrated$monocle_clusters_umap_Cell.Type
+)
+combined$umap_label <- ifelse(
+  combined$Dataset == 'PiD', 'PiD', combined$monocle_clusters_umap_Cell.Type
+)
+
+p1 <- DimPlot(combined, group.by='umap_label', split.by='Dataset', label=TRUE) + NoLegend() + ggtitle('LSI') + umap_theme
+p2 <- DimPlot(integrated, group.by='umap_label', split.by='Dataset', label=TRUE) + NoLegend() + ggtitle('reciprocal LSI') + umap_theme
+
+pdf(paste0(fig_dir, 'umap_PiD_AD_integrated.pdf'), width=7, height=7)
+p1 /
+p2
+dev.off()
+
+
+
+################################################################################
+# compute transfer anchors
+################################################################################
+
+# find transfer anchors
+transfer.anchors <- FindTransferAnchors(
+  reference = NucSeq.atac,
+  query = seurat_obj,
+  reference.reduction = "lsi",
+  reduction = "lsiproject",
+  dims = 2:30
+)
+
+predictions.assay <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = NucSeq.atac$monocle_clusters_umap_Cell.Type,
+  prediction.assay = TRUE,
+  weight.reduction = seurat_obj[["lsi"]],
+  dims=2:30
+)
+
+seurat_obj[["predictions"]] <- predictions.assay
+
+################################################################################
+# Plot LT results:
+################################################################################
+
+
+DefaultAssay(seurat_obj) <- 'predictions'
+
+
+prediction_df <- GetAssayData(seurat_obj, assay='predictions') %>% t %>% as.data.frame
+seurat_obj$max_prediction <- prediction_df$max
+table(seurat_obj$max_prediction >= 0.75)
+
+# plot histogram of LT scores
+pdf(paste0(fig_dir, 'prediction_score_max_histogram.pdf'), width=6, height=3, useDingbats=F)
+ggplot(prediction_df, aes(x=max)) +
+geom_histogram( position="identity", alpha=0.5)+
+geom_vline(xintercept=0.5) +
+ggtitle('Label Transfer max prediction score') +
+theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+# feature plot
+colfunc <- colorRampPalette(c((brewer.pal(9, 'Purples' )[2:9]) ))
+plot_list <- FeaturePlot(seurat_obj, features=rownames(seurat_obj), combine=FALSE)
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + scale_color_gradientn(colors=colfunc(256)) + umap_theme
+}
+
+pdf(paste0(fig_dir, 'umap_label_transfer.pdf'), width=16, height=8)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+
+# DotPlot for all prediction scores:
+colfunc <- colorRampPalette(c(rev(brewer.pal(9, 'Purples' )[2:9]), 'white'))
+
+prediction_features <- rownames(seurat_obj)[order(rownames(seurat_obj))]
+# prediction_features <- prediction_features[prediction_features != 'max']
+p <- DotPlot(seurat_obj, features=prediction_features, group.by='seurat_clusters', dot.min=0.15 ) +
+  RotatedAxis() +
+    scale_color_gradientn( name='Prediction Score',
+    colors=rev(colfunc(256)),
+    guide = guide_colorbar(barwidth=0.5, barheight=20, ticks=FALSE, label=FALSE)
+) + coord_flip() +
+  ylab('') + xlab('')
+pdf(paste0(fig_dir, 'label_transfer_prediction_dotplot.pdf'), width=12, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+################################################################################
+# save everything:
+################################################################################
+
+saveRDS(NucSeq.atac, paste0(data_dir, 'AD_atac_seurat.rds'))
+saveRDS(seurat_obj, paste0(data_dir, 'PiD_atac_seurat.rds'))
+saveRDS(combined, paste0(data_dir, 'AD_PiD_combined_seurat.rds'))
+saveRDS(integrated, paste0(data_dir, 'AD_PiD_integrated_seurat.rds'))
+saveRDS(transfer.anchors, paste0(data_dir, 'transfer_anchors.rds'))
+
+```
+
+Additional plotting etc:
+
+```{r eval=FALSE}
+
+# correlation between depth and LSI
+pdf(paste0(fig_dir, 'lsi_depth_cor.pdf'), width=6, height=4)
+DepthCor(seurat_obj)
+dev.off()
+
+
+#plot clusters:
+p <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'umap_clusters.pdf'), width=7, height=7)
+p
+dev.off()
+
+
+#plot cluster subset by LT max score
+p <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme
+p2 <- DimPlot(subset(seurat_obj, max_prediction >= 0.95), group.by='seurat_clusters', label=TRUE) + NoLegend() + umap_theme + ggtitle('max_prediction >= 0.95')
+
+pdf(paste0(fig_dir, 'umap_clusters_subset.pdf'), width=10, height=5)
+p | p2
+dev.off()
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+## Primary Data processing
+
+```{r eval=FALSE}
+
+# LSI
+proj <- addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+# batch correction with Harmony:
+proj <- addHarmony(
+  proj, reducedDims = "IterativeLSI",
+  name = 'Harmony', groupBy='Sample', force=TRUE
+)
+
+# Seurat clustering:
+proj <- addClusters(input = proj, reducedDims = "Harmony", force=TRUE)
+
+# UMAP:
+proj <- addUMAP(ArchRProj = proj, reducedDims = "Harmony", force=TRUE, minDist=0.05)
+
+
+# plot UMAP by cluster and sample
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+p3 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DX", embedding = "UMAP")
+
+plotPDF(p1,p2,p3, name = "qc_filtered-UMAP-Sample-Clusters.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "nFrags", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "TSSEnrichment", embedding = "UMAP")
+
+plotPDF(p1,p2, name = "qc_filtered-UMAP-qc.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+
+```
+
+plot umap with facet wrap:
+
+```{r eval=FALSE}
+
+proj@cellColData$UMAP1 <- proj@embeddings$UMAP$df[,1]
+proj@cellColData$UMAP2 <- proj@embeddings$UMAP$df[,2]
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=Sample)) +
+  geom_point(alpha=0.25, size=0.25)
+
+pdf('EDA_no_bad/Plots/umap_samples_split.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# TSS enrichment
+###############################################################################
+
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(TSSEnrichment))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_tssEnrich.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# Reads in promoter
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(ReadsInPromoter))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_ReadsInPromoter.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# Reads in blacklist
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(ReadsInBlacklist))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_ReadsInBlacklist.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+###############################################################################
+# nFrags
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log(nFrags))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_nFrags.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+###############################################################################
+# NucleosomeRatio
+###############################################################################
+
+p <- proj@cellColData %>% as.data.frame %>% ggplot(aes(x=UMAP1, y=UMAP2, color=NucleosomeRatio)) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_NucleosomeRatio.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+
+```
+
+
+## Marker gene visualization:
+
+```{r eval=FALSE}
+
+# imputation weights using MAGIC
+proj <- addImputeWeights(proj)
+
+canonical_markers <- list(
+  'Astrocyte' = c('GFAP', 'AQP4', 'SLC1A2'),
+  'Pan-neuronal' = c('SNAP25', 'SYT1'),
+  'Excitatory_Neuron' = c('SLC17A7', 'SATB2'),
+  'Inhibitory_Neuron' = c('GAD1', 'GAD2'),
+  'Microglia' = c('CSF1R', 'CD74', 'P2RY12'),
+  'Oligodendrocyte' = c('MOBP', 'MBP', 'MOG'),
+  'Olig_Progenitor' = c('PDGFRA', 'CSPG4')
+)
+
+# with imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(proj),
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-W-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+# without imputation
+p <- plotEmbedding(
+    ArchRProj = proj,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = NULL,
+    pal=viridis(256)
+)
+plotPDF(plotList = p,
+    name = "Plot-UMAP-Marker-Genes-without-Imputation.pdf",
+    ArchRProj = proj,
+    addDOC = FALSE, width = 5, height = 5)
+
+proj <- saveArchRProject(ArchRProj = proj)
+
+
+```
+
+Make my own expression plot with
+
+```{r eval=FALSE}
+
+getAvailableMatrices(proj)
+
+gene_matrix <- getMatrixFromProject(proj, useMatrix='GeneScoreMatrix')
+gm <- assays(gene_matrix)$GeneScoreMatrix
+rownames(gm) <- gene_matrix@elementMetadata$name
+colnames(gm) <- rownames(proj@cellColData)
+
+
+# plot GFAP:
+
+df <- proj@cellColData %>% as.data.frame %>% select(c(UMAP1, UMAP2, Sample))
+df$expression <- gm['CSF1R',]
+
+p <- df %>% ggplot(aes(x=UMAP1, y=UMAP2, color=log2(expression+1))) +
+  geom_point(alpha=0.25, size=0.25) + scale_color_gradientn(colors=rev(magma(256)))
+  #geom_hex() + scale_fill_gradientn(colors=rev(magma(256)))
+
+pdf('EDA_no_bad/Plots/umap_gfap.pdf', width=12, height=12)
+p + facet_wrap(~Sample) + theme_pubr() +
+theme(
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+)
+dev.off()
+
+
+
+```
+
+Process one sample only just as a test:
+
+```{r eval=FALSE}
+
+
+proj_test <- proj[which(proj$Sample == 'Sample_10' & proj$TSSEnrichment > 10)]
+
+
+
+
+# LSI
+proj_test <- addIterativeLSI(proj_test, useMatrix = "TileMatrix", name = "IterativeLSI", force=TRUE)
+
+# batch correction with Harmony:
+# proj_test <- addHarmony(
+#   proj_test, reducedDims = "IterativeLSI",
+#   name = 'Harmony', groupBy='Sample'
+# )
+
+# Seurat clustering:
+proj_test <- addClusters(input = proj_test, reducedDims = "IterativeLSI", force=TRUE)
+
+# UMAP:
+proj_test <- addUMAP(ArchRProj = proj_test, reducedDims = "IterativeLSI", force=TRUE, minDist=0.1)
+
+
+# plot UMAP by cluster and sample
+p1 <- plotEmbedding(ArchRProj = proj_test, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+plotPDF(p1, name = "Sample10-UMAP-Sample-Clusters.pdf",
+        ArchRProj = proj, addDOC = FALSE, width = 5, height = 5)
+
+
+
+
+# imputation weights using MAGIC
+proj_test <- addImputeWeights(proj_test, force=TRUE)
+
+# with imputation
+p <- plotEmbedding(
+    proj_test,
+    colorBy = "GeneScoreMatrix",
+    name = unlist(canonical_markers),
+    embedding = "UMAP",
+    imputeWeights = getImputeWeights(proj_test),
+    pal=viridis(256)
+)
+
+plotPDF(plotList = p,
+    name = "Sample10-UMAP-Marker-Genes-W-Imputation.pdf",
+    ArchRProj = proj_test,
+    addDOC = FALSE, width = 5, height = 5)
+
+
+
+```

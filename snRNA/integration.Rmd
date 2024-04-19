@@ -1,0 +1,258 @@
+```{r eval=FALSE}
+
+# conda activate voyager
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(viridis)
+library(cowplot)
+library(ggrepel)
+library(ggpubr)
+library(ggrastr)
+library(patchwork)
+library(MetBrewer)
+theme_set(theme_cowplot())
+
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+# set random seed for reproducibility
+set.seed(12345)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/integration/')
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+
+# load seurat object
+seurat_rna <- readRDS(file=paste0(data_dir, 'PiD_snRNA_seurat.rds'))
+
+seurat_atac <- readRDS("/dfs7/swaruplab/zechuas/Projects/PiD_2021/scATAC_data/Data/PiD_AD_integrated_input_wUpdatedFragPath_08_09_2022.rds")
+
+```
+
+Integration 
+
+```{r eval=FALSE}
+
+# using variable genes
+# seurat_rna <- FindVariableFeatures(
+#   object = seurat_rna,
+#   nfeatures = 3000
+# )
+
+
+
+
+# only keep the PiD dataset
+seurat_atac <- subset(seurat_atac, Dataset == 'PiD')
+
+seurat_atac <- RenameAssays(seurat_atac, Activity = 'RNA')
+DefaultAssay(seurat_atac) <- 'RNA'
+
+seurat_rna$tech <- 'rna'
+seurat_atac$tech <- 'atac'
+
+# get snRNA marker genes
+degs <- read.csv(file='/dfs7/swaruplab/smorabit/analysis/PiD_2021/snRNA/DEGs/data/PiD_cluster_markers_snRNA.csv')
+marker_genes <- subset(degs, avg_log2FC > 1) %>% .$gene %>% unique
+
+# which genes are in the ATAC dataset?
+marker_genes <- marker_genes[marker_genes %in% rownames(seurat_atac)]
+length(marker_genes)
+genes.use <- marker_genes
+
+pryr::mem_used()
+transfer.anchors <- FindTransferAnchors(
+  reference = seurat_rna,
+  query = seurat_atac,
+  features = genes.use,
+  reduction = 'cca',
+  dims = 1:30
+)
+saveRDS(transfer.anchors, paste0(data_dir, 'integration_anchors_markers.rds'))
+
+
+predictions.assay <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = seurat_rna$annotation,
+  prediction.assay = TRUE,
+  weight.reduction = seurat_atac[["harmony"]],
+  dims=1:30
+)
+
+seurat_atac[["predictions"]] <- predictions.assay
+
+
+
+```
+
+Plotting 
+
+```{r eval=FALSE}
+
+
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+
+group <- 'celltype_markers'
+
+dir.create(paste0(fig_dir, 'label_transfer_', group))
+
+# Plot prediction scores for some clusters:
+DefaultAssay(seurat_atac) <- "predictions"
+prediction_matrix <- GetAssayData(seurat_atac, assay='predictions')
+
+p1 <- DimPlot(seurat_atac, group.by=group, label=TRUE) + hdWGCNA::umap_theme() + NoLegend()
+for(label in rownames(seurat_atac)){
+
+  name <- gsub(' ', '_', label)
+  name <- gsub('/', '_', label)
+  print(name)
+
+  # umap feature plot
+  p2 <- FeaturePlot(seurat_atac, features=label, order=TRUE) +
+    scale_color_gradientn(colors=colfunc(256), guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)) +
+    hdWGCNA::umap_theme() + theme(legend.position='bottom')
+
+
+  # cluster violin plot:
+  p3 <- VlnPlot(seurat_atac, group.by=group, features=label, pt.size=0) +
+   NoLegend() + ggtitle('') +
+   ylab(paste(label, 'score')) + xlab('clusters')
+
+  # patchwork
+  patch <- (p1 + p2) / p3
+
+  pdf(paste0(fig_dir, 'label_transfer_', group, '/', gsub(' ', '_', name), '.pdf'), width=9, height=9, useDingbats=FALSE)
+  print(patch + plot_layout(heights=c(2,1)))
+  dev.off()
+}
+
+# DotPlot for all prediction scores:
+colfunc <- colorRampPalette(c(rev(brewer.pal(9, 'Purples' )[2:9]), 'white'))
+
+
+prediction_features <- rownames(seurat_atac)[order(rownames(seurat_atac))]
+prediction_features <- prediction_features[prediction_features != 'max']
+p <- DotPlot(seurat_atac, features=prediction_features, group.by=group, dot.min=0.15 ) +
+  RotatedAxis() +
+    scale_color_gradient( name='Prediction Score',
+    high='darkorchid4', low='grey95',
+    guide = guide_colorbar(barwidth=0.5, barheight=20, ticks=FALSE, label=FALSE)
+) +
+  ylab('') + xlab('')
+pdf(paste0(fig_dir, 'label_transfer_prediction_dotplot.pdf'), width=10, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+
+
+rownames(scaled) <- paste0('pred.', rownames(scaled))
+meta <- seurat_atac@meta.data 
+seurat_atac@meta.data <- cbind(meta, t(scaled))
+
+p <- DotPlot(seurat_atac, features=rownames(scaled)[1:nrow(scaled)-1], group.by=group, dot.min=0.15 ) +
+  RotatedAxis() +
+    scale_color_gradient( name='Prediction Score',
+    high='darkorchid4', low='grey95',
+    guide = guide_colorbar(barwidth=0.5, barheight=20, ticks=FALSE, label=FALSE)
+) +
+  ylab('') + xlab('')
+pdf(paste0(fig_dir, 'label_transfer_prediction_dotplot.pdf'), width=10, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+
+#Sankey plot
+
+prediction_matrix <- GetAssayData(seurat_atac, assay='predictions')
+scaled <- t(scale(t(prediction_matrix), center=FALSE))
+prediction_matrix <- scaled
+seurat_atac$prediction <- rownames(prediction_matrix)[apply(prediction_matrix[1:nrow(prediction_matrix)-1,], 2, which.max)]
+
+df <- seurat_atac@meta.data %>% 
+  ggsankey::make_long(celltype, prediction)
+
+
+p <- ggplot(df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node)) +
+  geom_sankey() +
+  geom_sankey_label(size=2) +
+  theme_sankey(base_size = 16) + NoLegend() +
+  #scale_fill_manual(values=mod_colors) + 
+  scale_x_discrete(labels=c('ATAC','RNA')) 
+
+pdf(paste0(fig_dir, 'prediction_sankey_markers.pdf'), width=12, height=6)
+p
+dev.off()
+
+saveRDS(seurat_atac, paste0(data_dir, 'PiD_snATAC_label_transfer.rds'))
+
+
+```
+
+Compute the accuracy 
+
+```{r eval=FALSE}
+
+seurat_atac$prediction_celltype <- gsub('[[:digit:]]+', '', seurat_atac$prediction)
+
+prediction_df <- seurat_atac@meta.data %>% group_by(celltype, prediction_celltype) %>% 
+    summarise(n=n()) %>%
+    mutate(freq = n / sum(n)) 
+
+prediction_df %>% subset(celltype == prediction_celltype)
+
+# compute the overall accuracy
+sum(seurat_atac$prediction_celltype == seurat_atac$celltype) / ncol(seurat_atac)
+
+
+```
+
+Integration 
+
+```{r eval=FALSE}
+
+
+refdata <- GetAssayData(seurat_rna, assay = "RNA", slot = "data")[genes.use, ]
+imputation <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = refdata,
+  weight.reduction = seurat_atac[["harmony"]],
+  dims = 1:30
+)
+
+seurat_atac <- RenameAssays(seurat_atac, RNA = 'Activity')
+
+
+seurat_atac[["RNA"]] <- imputation
+
+
+DefaultAssay(seurat_atac) <- 'RNA'
+coembed <- merge(x = seurat_rna, y = seurat_atac)
+
+
+
+coembed <- ScaleData(coembed, features = genes.use, do.scale = FALSE)
+coembed <- RunPCA(coembed, features = genes.use, verbose = FALSE)
+coembed <- RunUMAP(coembed, dims = 1:30)
+
+p1 <- DimPlot(subset(coembed, tech=='rna'), group.by='annotation', label=TRUE) + hdWGCNA::umap_theme() + NoLegend() + ggtitle('RNA clusters')
+p2 <- DimPlot(subset(coembed, tech=='atac'), group.by='prediction', label=TRUE) + hdWGCNA::umap_theme() + NoLegend()+ ggtitle('ATAC prediction')
+p3 <- DimPlot(subset(coembed, tech=='atac'), group.by='celltype', label=TRUE) + hdWGCNA::umap_theme() + NoLegend()+ ggtitle('ATAC cell type')
+
+pdf(paste0(fig_dir, 'umap_coembed_markers.pdf'), width=12, height=4, useDingbats=FALSE)
+p1 + p2 + p3
+dev.off()
+
+saveRDS(coembed, paste0(data_dir, 'PiD_snRNA_snATAC_integrated.rds'))
+
+
+```

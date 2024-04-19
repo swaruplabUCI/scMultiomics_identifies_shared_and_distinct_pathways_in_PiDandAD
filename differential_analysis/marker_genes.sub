@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=FindMarkers
+#SBATCH -p standard
+#SBATCH -A vswarup_lab
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --error=slurm-%J.err
+#SBATCH --mem 48G
+#SBATCH --array=1-7
+#SBATCH --time=72:00:00
+
+source ~/.bashrc
+conda activate cicero
+
+# seurat object path:
+seurat="/dfs3b/swaruplab/smorabit/analysis/PiD_2021/data/PiD_AD_integrated_in_progress_11-01-21.rds"
+outdir="/dfs3b/swaruplab/smorabit/analysis/PiD_2021/analysis/DARs/marker_genes/"
+type="markers"
+name="marker_genes"
+cluster="celltype"
+latent="nCount_peaks"
+
+# launch R script:
+Rscript --vanilla /dfs3b/swaruplab/smorabit/analysis/PiD_2021/bin/parallel_DEGs.R \
+    --seurat $seurat \
+    --outdir $outdir \
+    --type $type \
+    --cluster $cluster \
+    --name $name \
+    --index $SLURM_ARRAY_TASK_ID \
+    --test "LR" \
+    --pos "TRUE" \
+    --pct 0 \
+    --logfc 0 \
+    --verbose "TRUE" \
+    --assay "Activity" \
+    --latent $latent \
+    --cores 16
