@@ -1,4 +1,0 @@
-Should go through the tutorial of how to run gkm_explain
-
-https://academic.oup.com/bioinformatics/article/35/14/i173/5529147
-https://github.com/kundajelab/lsgkm
