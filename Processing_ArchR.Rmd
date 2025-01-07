@@ -20,8 +20,7 @@ addArchRThreads(threads = 8)
 cellranger_dir <-  '~/swaruplab/smorabit/data/PiD_2021/March2021/cellranger-count/'
 sample_names <- dir(cellranger_dir)[grepl('Swarup_Lab', dir(cellranger_dir))]
 
-# for now exclude samples 7, 18, 23 since they aren't done running:
-sample_names <- sample_names[!c(sample_names %in% c('Swarup_Lab_7', 'Swarup_Lab_18', 'Swarup_Lab_23'))]
+#
 sample_files <- paste0(cellranger_dir, sample_names, '/outs/fragments.tsv.gz')
 
 sample_names <- gsub('Swarup_Lab', 'Sample', sample_names)
@@ -45,10 +44,6 @@ doubScores <- addDoubletScores(
 
 # add the other arrow files from the pilot:
 ArrowFiles <- dir('./')[grepl('.arrow', dir('./'))]
-
-# exclude bad samples:
-exclude <- paste0(c('Sample_8', 'Sample_12', 'Sample_19', 'Sample_20', 'Sample_21'), '.arrow')
-ArrowFiles <- ArrowFiles[!(ArrowFiles %in% exclude)]
 
 proj <- ArchRProject(
   ArrowFiles = ArrowFiles,
@@ -74,9 +69,9 @@ QC cutoff:
 
 proj <- loadArchRProject(path = "EDA_no_bad")
 
-which(proj$TSSEnrichment > 6 & proj$nFrags > 3000) %>% length
+# which(proj$TSSEnrichment > 6 & proj$nFrags > 1500) %>% length
 
-proj<- proj[which(proj$TSSEnrichment > 6 & proj$nFrags > 3000)]
+proj<- proj[which(proj$TSSEnrichment > 6 & proj$nFrags > 1500)]
 table(proj$Sample)
 nrow(proj@cellColData)
 

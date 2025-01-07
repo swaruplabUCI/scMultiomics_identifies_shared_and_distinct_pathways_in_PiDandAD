@@ -426,34 +426,3 @@ p <- VlnPlot(
 pdf(paste0(fig_dir, cur_motif, '_enrichment.pdf'), width=12, height=4, useDingbats=FALSE)
 p
 dev.off()
-
-
-
-```
-
-One differential test:
-
-```{r eval=FALSE}
-
-
-x1 <- GetAssayData(seurat_obj, assa='peaks', slot='counts')
-x2 <- GetAssayData(seurat_obj, assa='peaks', slot='data')
-
-sum(is.na(seurat_obj@meta.data$Age))
-
-cur_seurat <- subset(seurat_obj, celltype == 'MG' & Diagnosis != 'Control')
-Idents(cur_seurat) <- cur_seurat$Diagnosis
-
-test <- FindMarkers(
-  cur_seurat,
-  ident.1 = 'AD',
-  ident.2 = 'PiD',
-  assay = 'peaks',
-  test.use = 'LR',
-  min.pct=0,
-  logfc.threshold=0.1,
-  only.pos=FALSE,
-  latent.vars = c('nCount_peaks', 'Sex', 'Batch', 'Age')
-)
-
-```

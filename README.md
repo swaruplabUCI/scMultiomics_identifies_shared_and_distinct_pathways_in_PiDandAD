@@ -10,7 +10,16 @@ Disease Group: Alzheimer's disease vs Control; Pick’s disease vs Control
 
 How to cite
 ------------
+Shi, Z., Das, S., Morabito, S., Miyoshi, E., Stocksdale, J., Emerson, N., Srinivasan, S. S., Shahin, A., Rahimzadeh, N., Cao, Z., Silva, J., Castaneda, A. A., Head, E., Thompson, L., & Swarup, V. (2024). Single-nucleus multi-omics identifies shared and distinct pathways in Pick's and Alzheimer's disease. bioRxiv : the preprint server for biology, 2024.09.06.611761. https://doi.org/10.1101/2024.09.06.611761
 
+
+Data generated in this study
+------------
+**scROAD - Single-cell Regulatory Occupancy Archive in Dementia**
+
+Website: http://swaruplab.bio.uci.edu/scROAD
+
+All raw and processed single-nucleus ATAC, single-nucleus RNA and bulk RNA sequencing data have been deposited into the National Center for Biotechnology Information Gene Expression Omnibus (GEO) database and will be made publicly available upon publication. All data in this manuscript have been deposited in the NIH GEO database (GSE259298).
 
 
 Contributors
@@ -45,6 +54,24 @@ Zechuan Shi [@rootze](https://github.com/rootze) created analysis documents that
 - TOBIAS (v0.14.0)
 - CellBender (v0.2.1)
 - Scrublet (v0.2.3)
+
+
+Analysis Code
+------------
+snATAC-seq processing
+* [Raw Processing](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/blob/main/Processing_ArchR.Rmd)
+* [Integrated analysis for PiD snATAC-seq data with AD](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/blob/main/integrated_dataset_basics.Rmd)
+
+Cis-regulatory Analysis and TF-regulatory network
+* [Cicero](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/tree/main/Cis_regulatory_network)
+* [TOBIAS footprinting](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/tree/main/footprinting)
+* [TF network](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/tree/main/TF_Net)
+
+snRNA-seq processing
+* [Raw processing](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/blob/main/snRNA/snRNA_clustering.ipynb)
+* [Scanpy to Seurat](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/blob/main/snRNA/scanpy_to_seurat.Rmd)
+* [Differential Gene Expression](https://github.com/swaruplabUCI/scMultiomics_identifies_shared_and_distinct_pathways_in_PiDandAD/blob/main/snRNA/DEG_analysis.Rmd)
+
 
 Getting help
 ------------
