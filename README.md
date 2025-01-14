@@ -1,5 +1,8 @@
 # scMultiomics_identifies_shared_and_distinct_pathways_in_Picks_and_Alzheimers_disease
 
+[![DOI](https://zenodo.org/badge/789167736.svg)](https://doi.org/10.5281/zenodo.14649026)
+
+
 Introduction
 ------------
 
