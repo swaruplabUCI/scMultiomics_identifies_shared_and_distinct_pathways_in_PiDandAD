@@ -1,0 +1,91 @@
+#!/bin/bash
+#SBATCH --job-name=tobias      ## Name of the job.
+#SBATCH -A class-nb227     ## account to charge (all labs have a separate account, if not request HPC)
+#SBATCH -p standard          ## partition/queue name
+#SBATCH --nodes=1            ## (-N) number of nodes to use
+#SBATCH --ntasks=1           ## (-n) number of tasks to launch
+#SBATCH --cpus-per-task=12    ## number of cores the job needs
+#SBATCH --mem=32G    ## number of cores the job needs
+#SBATCH --error=slurm-%J.err ## error log file
+
+source /data/homezvol2/vswarup/miniconda3/etc/profile.d/conda.sh
+conda activate tobias
+
+BAMFILE=$1
+NAME=$2
+INPUT_DIR=/share/crsp/lab/alsppg/share/MIT_R62_ATAC/bams
+OUTPUT_DIR=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/footprints
+BAMFILE=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/merged_bams/${BAMFILE}
+GENOME=/data/homezvol2/vswarup/project/bin/TOBIAS/tobias/mm10.fa ## must be indexed, samtools faidx
+MERGED_PEAKS=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/Merged_bed/merged_peaks.bed ## merging all bedfiles from macs2 run_macs2.sh file
+MERGED_PEAKS_HEADER=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/Merged_bed/merged_peaks_header.txt ## header
+BLACKLIST=/data/homezvol2/vswarup/project/bin/TOBIAS/tobias/mm10.blacklist.bed #from https://sites.google.com/site/anshulkundaje/projects/blacklists
+JASPER_MOTIFS=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/motifs.jaspar
+
+
+cd ${OUTPUT_DIR}
+
+
+#TOBIAS ATACorrect --bam ${BAMFILE} --genome ${GENOME} --peaks ${MERGED_PEAKS} --blacklist ${BLACKLIST} --outdir ${NAME}_ATACorrect --cores 12
+cd ${NAME}_ATACorrect
+#TOBIAS FootprintScores --signal ${NAME}_corrected.bw --regions ${MERGED_PEAKS} --output ${NAME}_footprints.bw --cores 12
+#TOBIAS BINDetect --motifs ${JASPER_MOTIFS} --signals ${NAME}_footprints.bw --genome ${GENOME} --peaks ${MERGED_PEAKS} --peak_header ${MERGED_PEAKS_HEADER} --outdir BINDetect_single_output --cores 12
+
+
+
+##submit
+
+cd /data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/merged_bams
+for folder in *.bam;do
+echo $folder;
+name=`basename $folder .bam`;
+echo $name;
+cd /data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint;
+sbatch run_tobias.sh $folder $name;
+done
+
+##make bamfile list in R
+options(stringsAsFactors=F)
+targets=read.csv("metadata_footprinting_r6.csv")
+filename="/share/crsp/lab/alsppg/share/MIT_R62_ATAC/bams/"
+endname="_1.merged.nodup.bam"
+
+group=unique(targets$Group)
+for (i in 1:length(group)){
+  gr1=group[i]
+  samples=targets[targets$Group==gr1,"title"]
+  sample.names=paste0(filename,samples,endname)
+  write.table(sample.names,file=paste0(gr1,"_bamlist.txt"),row.names=F,col.names =F, quote=F)
+}
+
+
+
+###Merge bamfiles
+#!/bin/bash
+#SBATCH --job-name=bamtools      ## Name of the job.
+#SBATCH -A class-nb227     ## account to charge (all labs have a separate account, if not request HPC)
+#SBATCH -p standard          ## partition/queue name
+#SBATCH --nodes=1            ## (-N) number of nodes to use
+#SBATCH --ntasks=1           ## (-n) number of tasks to launch
+#SBATCH --cpus-per-task=12    ## number of cores the job needs
+#SBATCH --mem=32G    ## number of cores the job needs
+#SBATCH --error=slurm-%J.err ## error log file
+
+module load bamtools/2.5.1
+
+OUTPATH=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/merged_bams
+LIST1=$1
+BASENAME=$2
+MERGELIST=/data/homezvol2/vswarup/swaruplab/shared_lab/Collaborations/Leslie/R6_ATACseq_Footprint/${LIST1}
+
+cd ${OUTPATH}
+
+bamtools merge -list ${MERGELIST} -out ${BASENAME}.bam
+bamtools index -in ${BASENAME}.bam
+
+
+for file in *_bamlist.txt; do
+  name=`basename $file _bamlist.txt`;
+  echo $name;
+  sbatch mergeBamfiles.sh $file $name
+done
