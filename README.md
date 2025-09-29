@@ -10,6 +10,10 @@ Introduction
 
 Disease Group: Alzheimer's disease vs Control; Pick’s disease vs Control
 
+The study of transcriptomic and epigenomic variations in neurodegenerative diseases, particularly tauopathies like Pick’s disease (PiD) and Alzheimer’s disease (AD), offers insights into their underlying regulatory mechanisms. Here, we identified critical regulatory changes driving disease progression, revealing potential therapeutic targets. Our comparative analyses uncovered disease-enriched non-coding regions and genome-wide transcription factor (TF) binding differences, linking them to target genes. Notably, we identified a distal human-gained enhancer (HGE) associated with E3 ubiquitin ligase (UBE3A), highlighting disease-specific regulatory alterations. Additionally, fine-mapping of AD risk genes uncovered loci enriched in microglial enhancers and accessible in other cell-types. Shared and distinct TF binding patterns were observed in neurons and glial cells across PiD and AD. We validated our findings using CRISPR to excise a predicted enhancer region in UBE3A and developed an interactive database, scROAD, to visualize predicted single-cell TF occupancy and regulatory networks.
+
+![Overview of study](Figures/Fig_overview.png)
+
 
 How to cite
 ------------
@@ -23,6 +27,10 @@ Data generated in this study
 Website: http://swaruplab.bio.uci.edu/scROAD
 
 All raw and processed single-nucleus ATAC, single-nucleus RNA and bulk RNA sequencing data have been deposited into the National Center for Biotechnology Information Gene Expression Omnibus (GEO) database and will be made publicly available upon publication. All data in this manuscript have been deposited in the NIH GEO database (GSE259298).
+
+GEO database (GSE259298):
+
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE259298
 
 
 Contributors
