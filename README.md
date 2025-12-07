@@ -17,7 +17,7 @@ The study of transcriptomic and epigenomic variations in neurodegenerative disea
 
 How to cite
 ------------
-Shi, Z., Das, S., Morabito, S., Miyoshi, E., Stocksdale, J., Emerson, N., Srinivasan, S. S., Shahin, A., Rahimzadeh, N., Cao, Z., Silva, J., Castaneda, A. A., Head, E., Thompson, L., & Swarup, V. (2024). Single-nucleus multi-omics identifies shared and distinct pathways in Pick's and Alzheimer's disease. bioRxiv : the preprint server for biology, 2024.09.06.611761. https://doi.org/10.1101/2024.09.06.611761
+Shi Z, Das S, Morabito S, Stocksdale J, Miyoshi E, Srinivasan SS, Emerson N, Shahin A, Rahimzadeh N, Cao Z, Silva J, Castaneda AA, Head E, Thompson L, Swarup V. Single-nucleus multi-omics identifies shared and distinct pathways in Pick's and Alzheimer's disease. Sci Adv. 2025 Nov 14;11(46):eads7973. doi: 10.1126/sciadv.ads7973. Epub 2025 Nov 12. PMID: 41223260; PMCID: PMC12609060.
 
 
 Data generated in this study
